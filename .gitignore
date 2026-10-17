@@ -1,0 +1,15 @@
+# test output
+test/*.png
+test/out/
+test/failures.json
+test/blobdata.json
+build.log
+
+# build output (made fresh by build_app.py / GitHub Actions)
+dist/
+__pycache__/
+
+# scratch
+test/_timed.mjs
+test/last-results.txt
+test/bench-*.txt

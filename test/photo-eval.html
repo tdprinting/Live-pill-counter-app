@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pill counter - real photo evaluation</title>
+<style>
+:root{--bg:#f5f6f8;--fg:#1c2330;--card:#fff;--line:#d9dde4;--ok:#1a8f3c;--bad:#c62828;--amb:#c77700;--mut:#6b7280}
+@media (prefers-color-scheme:dark){:root{--bg:#14171c;--fg:#e8eaee;--card:#1d222a;--line:#333a45;--mut:#9aa3af}}
+body{margin:0;font:15px/1.4 system-ui,sans-serif;background:var(--bg);color:var(--fg)}
+main{max-width:1200px;margin:0 auto;padding:16px}
+h1{font-size:20px;margin:0 0 8px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px;margin:12px 0}
+#drop{border:2px dashed var(--line);text-align:center;padding:18px}
+#drop.over{border-color:#2f6fed;background:rgba(47,111,237,.08)}
+button,.btn{font:inherit;padding:8px 14px;border-radius:8px;border:1px solid #2f6fed;background:#2f6fed;color:#fff;cursor:pointer}
+button.sec{background:transparent;color:inherit;border-color:var(--line)}
+button:disabled{opacity:.5}
+table{border-collapse:collapse;width:100%}
+th,td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top;font-size:13px}
+th{color:var(--mut);font-weight:600}
+.sumwrap{overflow-x:auto}
+.thumb{max-width:260px;width:100%;height:auto;display:block;border-radius:6px}
+.ok{color:var(--ok);font-weight:700}.bad{color:var(--bad);font-weight:700}.mut{color:var(--mut)}.amb{color:var(--amb)}
+.run{margin-bottom:6px;white-space:nowrap}
+.run b{display:inline-block;min-width:78px}
+.warn{font-size:12px;color:var(--amb)}
+#status{color:var(--mut);margin:6px 0}
+progress{width:100%}
+</style></head><body><main>
+<h1>Pill counter - real photo evaluation</h1>
+<div id="drop" class="card">
+  <p>Drop photos here (file names start with the true count, e.g. <code>30_blue_touching.jpg</code>) or</p>
+  <input id="file" type="file" accept="image/*" multiple hidden>
+  <button id="pick">Choose photos</button>
+  <button id="dl" class="sec" disabled>Download results JSON</button>
+  <div id="status"></div><progress id="prog" value="0" max="1" hidden></progress>
+</div>
+<div id="summary" class="card" hidden><b>Summary</b><div class="sumwrap" id="sumtab"></div></div>
+<div id="results" class="card" hidden><div class="sumwrap"><table><thead><tr>
+<th>Photo</th><th>Truth</th><th>Runs (total [range] confidence, time)</th><th>Broken / odd</th><th>Warnings</th></tr></thead><tbody id="rows"></tbody></table></div></div>
+</main>
+<script type="module" src="photo-eval.js"></script>
+</body></html>

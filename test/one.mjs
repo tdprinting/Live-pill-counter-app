@@ -1,0 +1,15 @@
+import { analyze } from "../src/pillcv.js";
+import { placePills, render, rng, writePNG } from "./synth.mjs";
+const [main="whiteRound", bg="blueTray", light="even", layout="spread", seed="5", odd=""] = process.argv.slice(2);
+const W=800,H=600, r=rng(+seed), ppm=3+r()*1.6, count=12+Math.floor(r()*30);
+const pills=placePills({main,count,odd:odd?[odd]:[],layout},r,W,H,ppm);
+const rgba=render(pills,{W,H,bg,light},+seed);
+const res=analyze(rgba,W,H,{});
+console.log("truth",pills.length,"got",res.total,res.range,"unit",res.unitArea.toFixed(0),"rUnit",res.rUnit.toFixed(1),"noise",JSON.stringify(res.noise),res.warnings, "bg",res.background);
+console.log("blobs", res.blobs.map(b=>`${b.n}${b.conf[0]}:${(b.nArea||0).toFixed(2)}`).join(" "));
+console.log("groups", res.groups.map(g=>`${g.count} ${g.role} ${g.colors} ${g.shape} asp${g.aspect?.toFixed(2)}`).join(" | "));
+const img=new Uint8ClampedArray(rgba);
+const dot=(x,y,c,rad)=>{for(let dy=-rad;dy<=rad;dy++)for(let dx=-rad;dx<=rad;dx++){const X=Math.round(x+dx),Y=Math.round(y+dy);if(X<0||Y<0||X>=W||Y>=H||dx*dx+dy*dy>rad*rad)continue;const i=(Y*W+X)*4;img[i]=c[0];img[i+1]=c[1];img[i+2]=c[2];}};
+for(const t of pills)dot(t.x,t.y,[0,255,0],2);
+for(const p of res.pills)dot(p.x,p.y,p.group>0?[255,0,255]:[255,0,0],4);
+writePNG("test/one.png",img,W,H);

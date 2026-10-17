@@ -1,0 +1,39 @@
+LIVE PILL COUNTER - HOW TO PUT IT ON AN IPHONE OR IPAD
+=======================================================
+
+The easy way (after the app has been pushed to GitHub once)
+-----------------------------------------------------------
+1. On the iPhone or iPad, open Safari (it has to be Safari, not Chrome).
+2. Go to  https://tdprinting.github.io/Live-pill-counter-app/
+3. Tap the Share button (square with an arrow), then "Add to Home Screen", then "Add".
+4. Open "Pill Count" from the home screen. It runs full screen like a normal app.
+5. The first time, tap "Allow" when it asks for the camera.
+After the first open it also works with no signal. When you open it online it
+updates itself to the newest version.
+
+If the address shows "404": on GitHub go to the repo's Settings -> Pages and set
+Branch to "gh-pages" and folder "/ (root)". The first push to "main" creates that branch.
+
+Tips for good counts
+--------------------
+- Use a plain, dark or blue tray / mat. Pills show up best against it.
+- Spread the pills out so they do not touch or pile up.
+- Avoid glare and shadows: soft, even light from above, phone held flat over the tray.
+- Keep the whole tray in view and hold still for a moment.
+
+The single-file copy (AirDrop / email)
+--------------------------------------
+"Live Pill Counter (standalone).html" is the whole app in one file. You can AirDrop
+or email it and open it in a browser. Two limits:
+- Opened from the Files app (or any file:// address) the browser does not count it as a
+  "secure" page, so the LIVE camera is not allowed. The app then falls back to
+  "Take photo", which opens the normal camera and counts the picture you take.
+- It cannot be added to the home screen with its own icon the same way. Use the web
+  address above for that.
+
+Other files in this folder
+--------------------------
+- src/ ........................... the app's source code (edit these)
+- app/ ........................... the built web app (made by build_app.py, published for you)
+- build_app.py ................... run "python build_app.py" to rebuild app/ and the standalone copy
+- tools/make_icons.py ............ redraws the icon pictures in assets/ (only needed if you change the icon)

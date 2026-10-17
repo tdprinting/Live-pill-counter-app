@@ -1,0 +1,84 @@
+name: Live Pill Counter iPhone app
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: iphone-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Quick checks before publishing (the slow full accuracy run, test/run.mjs, is not run here).
+      - name: Check the engine
+        run: |
+          set -e
+          for f in src/*.js; do
+            tmp="/tmp/check-$(basename "$f" .js).mjs"
+            cp "$f" "$tmp"
+            node --check "$tmp"
+            echo "syntax ok: $f"
+          done
+          if [ -f test/test-id.mjs ]; then node test/test-id.mjs; fi
+
+      - name: Version
+        id: ver
+        run: |
+          name="1.0.$(date -u +%Y%m%d).${GITHUB_RUN_NUMBER}"
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${name}" >> "$GITHUB_OUTPUT"
+
+      # Same build as on your computer: app/ (the iPhone web app) and the single-file copy.
+      - name: Build
+        run: python3 build_app.py "${{ steps.ver.outputs.name }}"
+
+      - name: Package downloads
+        run: |
+          mkdir -p dist
+          cp "Live Pill Counter (standalone).html" dist/live-pill-counter.html
+          (cd app && zip -qr ../dist/live-pill-counter-iphone-app.zip .)
+
+      # Published at https://<owner>.github.io/<repo>/ (Settings -> Pages -> Branch: gh-pages, / root).
+      - name: Publish to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: app
+          force_orphan: true
+          commit_message: iPhone app ${{ steps.ver.outputs.name }}
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: Live Pill Counter ${{ steps.ver.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          make_latest: true
+          body: |
+            ## Put it on your iPhone or iPad
+            1. Open **https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/** in **Safari**.
+            2. Tap **Share** (square with an arrow), then **Add to Home Screen**, then **Add**.
+            3. Open **Pill Count** from your home screen and allow the camera. It runs full screen and works without a signal after the first open.
+
+            Already installed? Just open it while online and it updates itself.
+
+            ## Downloads
+            - `live-pill-counter.html`: the whole app in one file. AirDrop or email it and open it in a browser. Opened from the Files app it cannot use the live camera, so it uses "Take photo" instead.
+            - `live-pill-counter-iphone-app.zip`: the web app folder, for hosting it somewhere else.
+          files: |
+            dist/live-pill-counter.html
+            dist/live-pill-counter-iphone-app.zip
