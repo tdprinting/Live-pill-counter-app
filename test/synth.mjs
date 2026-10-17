@@ -274,3 +274,43 @@ export function readPNG(path) {
   }
   return { rgba: out, W, H };
 }
+
+// --- LiDAR-style depth for the same scene (iPhone Pro: 256x192 depth, ~mm noise) ---
+// Pills rest on what is under them, so stacks really are taller. Returns depth in metres
+// at sensor resolution plus intrinsics in image-pixel units (what ARKit gives after scaling).
+export function renderDepth(pills, { W, H, pxPerMm, seed = 1, camZmm = 280, tilt = [0.04, -0.03], noiseMm = 0.8 }) {
+  const r = rng(seed * 13 + 5);
+  const hm = new Float32Array(W * H); // height above tray, mm
+  for (const p of pills) {
+    const [x0, y0, x1, y1] = [p.x - p.lenPx, p.y - p.lenPx, p.x + p.lenPx, p.y + p.lenPx].map(Math.round);
+    const caps = !!p.color2 || p.shape === "stadium";
+    const thick = (caps ? 1.0 : 0.45) * (p.widPx / pxPerMm);
+    // rest on the highest thing under the middle of the pill
+    let base = 0;
+    for (let y = Math.max(0, y0); y < Math.min(H, y1); y++) for (let x = Math.max(0, x0); x < Math.min(W, x1); x++) if (sdf(x, y, p) < -0.25 * p.widPx) base = Math.max(base, hm[y * W + x]);
+    base *= 0.85;
+    const rad = p.widPx / 2, bevel = 0.3 * rad;
+    for (let y = Math.max(0, y0); y < Math.min(H, y1); y++) for (let x = Math.max(0, x0); x < Math.min(W, x1); x++) {
+      const d = sdf(x, y, p);
+      if (d > 0) continue;
+      const depth = -d;
+      const prof = caps ? Math.sqrt(Math.max(0, 1 - (1 - Math.min(1, depth / rad)) ** 2)) : Math.min(1, 0.55 + 0.45 * depth / bevel);
+      const hh = base + thick * prof;
+      if (hh > hm[y * W + x]) hm[y * W + x] = hh;
+    }
+  }
+  const dw = 256, dh = Math.round((256 * H) / W), sx = W / dw, sy = H / dh;
+  const depth = new Float32Array(dw * dh), conf = new Uint8Array(dw * dh);
+  for (let j = 0; j < dh; j++) for (let i = 0; i < dw; i++) {
+    let s = 0, n = 0, mn = 1e9, mx = -1e9;
+    for (let y = Math.floor(j * sy); y < Math.min(H, Math.floor((j + 1) * sy)); y++) for (let x = Math.floor(i * sx); x < Math.min(W, Math.floor((i + 1) * sx)); x++) { const v = hm[y * W + x]; s += v; n++; mn = Math.min(mn, v); mx = Math.max(mx, v); }
+    const hAvg = n ? s / n : 0;
+    const u = (i + 0.5) / dw - 0.5, v = (j + 0.5) / dh - 0.5;
+    const z = camZmm * (1 + tilt[0] * u + tilt[1] * v) - hAvg;
+    const nz = noiseMm * (z / 300) ** 2 * (Math.sqrt(-2 * Math.log(r() + 1e-12)) * Math.cos(2 * Math.PI * r()));
+    depth[j * dw + i] = (z + nz) / 1000;
+    conf[j * dw + i] = mx - mn > 3 ? 1 : 2; // edges are less certain
+  }
+  const fx = pxPerMm * camZmm;
+  return { data: depth, w: dw, h: dh, conf, fx, fy: fx, cx: W / 2, cy: H / 2 };
+}

@@ -16,7 +16,7 @@ cannot work. The build therefore rewrites the code like this; keep to these rule
     worker.js may import only ./pillcv.js.
  2. Exports: only `export function/const/let/var/class/async function`. `export default` is NOT allowed.
     `export { ... };` lists are simply deleted. The build deletes the word `export`.
- 3. All modules are concatenated into ONE scope in this order: pill-db -> pillcv -> pill-id -> app.
+ 3. All modules are concatenated into ONE scope in this order: pill-db -> pillcv -> pill-id -> native-bridge -> app.
     So top-level function/const/let/var/class names must be unique across those files (the build FAILS
     LOUDLY if two modules declare the same top-level name; same check for pillcv + worker).
     Only declarations starting at column 0 count as "top level", so keep helper code inside functions
@@ -48,7 +48,7 @@ version = sys.argv[1] if len(sys.argv) > 1 else "dev"
 CACHE_PREFIX = "pill-count-"
 EXCLUDE = ["dev-*", "*.test.*"]
 ICON_FILES = ["apple-touch-icon.png", "icon-192.png", "icon-512.png", "icon.svg"]
-BUNDLE_ORDER = ["pill-db.js", "pillcv.js", "pill-id.js", "app.js"]
+BUNDLE_ORDER = ["pill-db.js", "pillcv.js", "pill-id.js", "native-bridge.js", "app.js"]
 WORKER_ORDER = ["pillcv.js", "worker.js"]
 WORKER_CALL = re.compile(r"""new\s+Worker\(\s*(["'])worker\.js\1\s*,\s*\{\s*type\s*:\s*(["'])module\2\s*\}\s*\)""")
 

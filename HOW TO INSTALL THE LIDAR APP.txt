@@ -1,0 +1,62 @@
+HOW TO INSTALL THE LIDAR (NATIVE iPHONE) APP
+============================================
+
+What this is
+  A real iPhone app ("Pill Count") that shows the same pill counter as the web app, but uses the
+  iPhone's LiDAR depth sensor too. You do not need a Mac: GitHub builds it for you in the cloud and
+  sends it to your phone through Apple's TestFlight app.
+  The web app (the Safari / Add to Home Screen version) keeps working exactly as before.
+  Both use the same code, so every improvement shows up in both.
+
+You need: an iPhone with LiDAR (iPhone 12 Pro or newer Pro models) for the depth features.
+  Other iPhones still run the app, just without depth.
+
+One-time setup (about 30 minutes, plus Apple's approval wait)
+
+ 1. Join the Apple Developer Program ($99 per year): https://developer.apple.com/programs/
+    Sign in with your Apple ID and enrol as an individual. Approval can take a day or two.
+    Note your Team ID (developer.apple.com > Account > Membership details, 10 letters/numbers).
+
+ 2. Create the app record:
+    https://appstoreconnect.apple.com > Apps > "+" > New App
+      Platform: iOS     Name: Pill Count (or anything unique)
+      Primary language: English     Bundle ID: com.tdprinting.livepillcounter
+      (if the bundle ID is not in the list: developer.apple.com > Certificates, IDs & Profiles >
+       Identifiers > "+" > App IDs > App, and enter exactly com.tdprinting.livepillcounter)
+      SKU: anything, for example pillcount1
+
+ 3. Create an App Store Connect API key:
+    App Store Connect > Users and Access > Integrations > App Store Connect API > Team Keys > "+"
+      Name: GitHub     Access: App Manager
+    Download the AuthKey_XXXXXXXXXX.p8 file (you can download it ONLY ONCE; keep it safe, never
+    share it or commit it to git). Write down the Key ID and the Issuer ID shown on that page.
+
+ 4. Turn the .p8 file into text (base64). On Windows, open PowerShell in the folder with the file:
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes("AuthKey_XXXXXXXXXX.p8")) | Set-Clipboard
+    That copies it to the clipboard. (Alternative: certutil -encode AuthKey_XXXXXXXXXX.p8 key.txt
+    and copy the whole contents of key.txt; the build understands both.)
+
+ 5. Add 4 secrets on GitHub:
+    github.com/tdprinting/Live-pill-counter-app > Settings > Secrets and variables > Actions >
+    New repository secret. Use these EXACT names:
+        ASC_KEY_ID       the Key ID from step 3
+        ASC_ISSUER_ID    the Issuer ID from step 3
+        ASC_KEY_P8       the base64 text from step 4
+        APPLE_TEAM_ID    your Team ID from step 1
+
+ 6. Put the app on your phone:
+    - Push to the main branch (or GitHub > Actions > "Live Pill Counter native iPhone app" >
+      Run workflow). The build takes about 10-20 minutes.
+    - First time only: GitHub may show the upload step failing until the app record in step 2 exists.
+    - In App Store Connect > your app > TestFlight, the new build appears after Apple processes it
+      (10-30 minutes). If asked about export compliance, choose "No" (the app is set up to skip it).
+    - TestFlight tab > Internal Testing > "+" > add yourself (your Apple ID must be a user in
+      Users and Access).
+    - On your iPhone install the free TestFlight app from the App Store, sign in with the same
+      Apple ID, open the invite and tap Install. Allow the camera when asked.
+
+After that: every push to main uploads a new build automatically. TestFlight shows an update,
+tap Update. Builds expire after 90 days, so keep pushing now and then.
+
+Without the secrets, GitHub still builds the app for the iPhone simulator on every push. That only
+proves the code compiles; it produces nothing you can install.

@@ -423,6 +423,11 @@ export function analyze(rgba, w, h, opts = {}) {
   if (Lref < 22) warnings.push("dark");
   if (clipped / Math.max(1, roiArea) > 0.04) warnings.push("glare");
 
+  // 2b. LiDAR (native app only): height above the tray plane, in mm, at image resolution.
+  const depthInfo = opts.depth && opts.depth.data ? heightMap(opts.depth, w, h, sIdx.filter((_, k) => sel.includes(k))) : null;
+  const Hm = depthInfo ? depthInfo.Hm : null;
+  if (depthInfo && !opts.mmPerPx) opts = { ...opts, mmPerPx: depthInfo.mmPerPx };
+
   // 3. Foreground score
   const D = new Float32Array(N), shadow = new Uint8Array(N), Ln = new Float32Array(N);
   const chromTol = clamp(0.012 + 0.004 * sensorNoise, 0.014, 0.05);
@@ -467,6 +472,9 @@ export function analyze(rgba, w, h, opts = {}) {
     if (!roi[i]) continue;
     const g = nearShadow[i] && G[i] < 2.5 * Tg ? 0 : G[i]; // a cast shadow's outline is not a pill edge
     if (D[i] > Td || g > Tg) strong[i] = 1;
+    // something standing up off the tray is an object even when its colour matches (white on white)
+    if (Hm && Hm[i] > depthInfo.hT) strong[i] = 1;
+    if (Hm && Hm[i] > 0.6 * depthInfo.hT) weak[i] = 1;
     if (D[i] > 0.55 * Td || g > 0.6 * Tg) weak[i] = 1;
   }
   // hysteresis: keep weak pixels connected to strong ones
@@ -693,6 +701,38 @@ export function analyze(rgba, w, h, opts = {}) {
     void label;
   }
 
+  // 5b. With depth: count clumps and stacks by VOLUME (sum of height) / volume of one pill.
+  // Hidden pills under others still add height, so this sees what the colour image cannot.
+  if (Hm) {
+    const vol = (px) => { let v = 0; for (const i of px) if (Hm[i] > 0) v += Hm[i]; return v; };
+    const vSingle = median(singlesRef.map((c) => vol(c.px)));
+    const noiseOk = depthInfo.noiseMm < 1.5;
+    if (vSingle > 0 && noiseOk) for (const bo of blobOut) {
+      if (!bo.n) continue;
+      const c = blobs.find((b) => b.id === bo.id);
+      const nVolRaw = vol(c.px) / vSingle;
+      // the sensor sees the pile's top surface: gaps under stacked pills read as solid, so only
+      // ~45% of the height above one layer is pill (calibrated on synthetic stacks; refine on real ones)
+      const nVol = nVolRaw > bo.nArea + 0.5 ? bo.nArea + 0.45 * (nVolRaw - bo.nArea) : nVolRaw;
+      bo.nVol = nVol;
+      if (bo.n === 1 && nVol < 1.6) continue;
+      const nV = Math.max(1, Math.round(nVol));
+      if (nV < bo.n && nVolRaw < bo.n - 0.6) {
+        // shape fitting over-split a clump the depth says is smaller: trust depth
+        const mine = pills.filter((q) => q.blob === bo.id).slice(nV);
+        for (const q of mine) pills.splice(pills.indexOf(q), 1);
+        bo.n = nV;
+      } else if (nV > bo.n) {
+        // pills hidden underneath: add them at the clump centre so they are counted and shown
+        const ref = pills.find((q) => q.blob === bo.id);
+        for (let k = bo.n; k < nV; k++) pills.push({ ...ref, x: c.cx + (k - bo.n) * 2, y: c.cy, a: ref.a, b: ref.b, hidden: true, inCluster: true, conf: "medium", px: ref.px });
+        bo.hidden = nV - bo.n; bo.n = nV;
+      }
+      bo.conf = Math.abs(nVol - bo.n) < 0.35 ? "high" : Math.abs(nVol - bo.n) < 0.6 ? "medium" : "low";
+      for (const q of pills) if (q.blob === bo.id) q.conf = bo.conf;
+    }
+  }
+
   // 6. Describe each pill: illumination-normalised colour, two-tone, size, aspect
   // white balance from the tray if it is near neutral
   let wbR = 1, wbG = 1, wbB = 1;
@@ -801,9 +841,10 @@ export function analyze(rgba, w, h, opts = {}) {
 
   const mmPerPx = opts.mmPerPx || null;
   return {
-    width: w, height: h, total, range: [lo, hi], confidence, unitArea: unit, rUnit,
+    width: w, height: h, total, range: [lo, hi], confidence,
+    depth: depthInfo ? { used: true, mmPerPx: depthInfo.mmPerPx, noiseMm: depthInfo.noiseMm, trayMm: depthInfo.trayMm } : null, unitArea: unit, rUnit,
     tray: tray ? { shape: "poly", x: tray.x, y: tray.y, w: tray.w, h: tray.h, poly: tray.poly } : null,
-    pills: pills.map((p) => ({ x: p.x, y: p.y, a: p.a, b: p.b, theta: p.theta, group: p.group, conf: p.conf, color: p.color, lab: p.lab, inCluster: p.inCluster, blob: p.blob })),
+    pills: pills.map((p) => ({ hidden: !!p.hidden, x: p.x, y: p.y, a: p.a, b: p.b, theta: p.theta, group: p.group, conf: p.conf, color: p.color, lab: p.lab, inCluster: p.inCluster, blob: p.blob })),
     fragments, blobs: blobOut,
     groups: groups.map((g) => summarizeGroup(g, mmPerPx)),
     background: { lab: [Lref, cA[0], cB[0]], name: colorName(Lref, cA[0], cB[0]), coverage: bgFrac },
@@ -996,6 +1037,36 @@ function detectTray(L, A, B, w, h) {
   fillPolygon(mask, w, h, st.hull);
   const [x0, y0, x1, y1] = st.bbox;
   return { mask, x: x0 / w, y: y0 / h, w: (x1 - x0 + 1) / w, h: (y1 - y0 + 1) / h, poly: st.hull.map(([x, y]) => [x / w, y / h]) };
+}
+
+// ---------- LiDAR height map ----------
+// depth: { data: Float32Array metres (dw x dh), w, h, conf?: Uint8Array, fx, fy, cx, cy } with
+// intrinsics in the analysed image's pixel units. bgIdx: image pixels known to be tray.
+function heightMap(depth, w, h, bgIdx) {
+  const { data, w: dw, h: dh, conf } = depth;
+  const sx = dw / w, sy = dh / h;
+  const zAt = (x, y) => { // bilinear, mm
+    const fx = Math.min(dw - 1.001, Math.max(0, (x + 0.5) * sx - 0.5)), fy = Math.min(dh - 1.001, Math.max(0, (y + 0.5) * sy - 0.5));
+    const x0 = fx | 0, y0 = fy | 0, ax = fx - x0, ay = fy - y0, k = y0 * dw + x0;
+    return 1000 * ((data[k] * (1 - ax) + data[k + 1] * ax) * (1 - ay) + (data[k + dw] * (1 - ax) + data[k + dw + 1] * ax) * ay);
+  };
+  // robust plane z = a + b*u + c*v through tray samples (iteratively drop outliers)
+  let pts = [];
+  for (const i of bgIdx) { const x = i % w, y = (i / w) | 0; const ci = Math.min(dh - 1, (y * sy) | 0) * dw + Math.min(dw - 1, (x * sx) | 0); if (!conf || conf[ci] >= 1) pts.push([x / w - 0.5, y / h - 0.5, zAt(x, y)]); }
+  if (pts.length < 30) return null;
+  let a = median(pts.map((q) => q[2])), b = 0, c = 0, sig = 3;
+  for (let it = 0; it < 4; it++) {
+    const keep = pts.filter((q) => Math.abs(q[2] - (a + b * q[0] + c * q[1])) < Math.max(1.2, 3 * sig));
+    let Suu = 0, Svv = 0, Suv = 0, Su = 0, Sv = 0, Sz = 0, Suz = 0, Svz = 0; const n = keep.length;
+    for (const [u, v, z] of keep) { Su += u; Sv += v; Sz += z; Suu += u * u; Svv += v * v; Suv += u * v; Suz += u * z; Svz += v * z; }
+    const sol = solve([[n, Su, Sv], [Su, Suu, Suv], [Sv, Suv, Svv]], [Sz, Suz, Svz], 3);
+    [a, b, c] = sol;
+    const res = keep.map((q) => q[2] - (a + b * q[0] + c * q[1]));
+    sig = Math.max(0.2, 1.4826 * median(res.map(Math.abs)));
+  }
+  const Hm = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) Hm[y * w + x] = a + b * (x / w - 0.5) + c * (y / h - 0.5) - zAt(x, y);
+  return { Hm, mmPerPx: a / depth.fx, noiseMm: sig, trayMm: a, hT: Math.max(1.2, 3.5 * sig) };
 }
 
 function localDT(px, w) {

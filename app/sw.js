@@ -2,7 +2,7 @@
 // The page itself is fetched fresh when online (so updates show up right away) and from the cache when offline.
 // Everything else (scripts, pill database, icons) is served from the cache first.
 const CACHE = "pill-count-dev";
-const CORE = ["./", "index.html", "manifest.webmanifest", "apple-touch-icon.png", "icon-192.png", "icon-512.png", "icon.svg", "app.js", "pill-db.js", "pill-id.js", "pillcv.js", "worker.js"];
+const CORE = ["./", "index.html", "manifest.webmanifest", "apple-touch-icon.png", "icon-192.png", "icon-512.png", "icon.svg", "app.js", "native-bridge.js", "pill-db.js", "pill-id.js", "pillcv.js", "worker.js"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(CORE)).then(() => self.skipWaiting()));

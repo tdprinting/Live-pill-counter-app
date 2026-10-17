@@ -13,3 +13,7 @@ __pycache__/
 test/_timed.mjs
 test/last-results.txt
 test/bench-*.txt
+
+# iOS (CI generates these)
+ios/*.xcodeproj/
+ios/Generated/
