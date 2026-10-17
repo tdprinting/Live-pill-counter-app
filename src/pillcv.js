@@ -1166,11 +1166,12 @@ function groupPills(pills, unit) {
   const groups = singles.length ? groupSet(singles, unit) : [];
   const rest = [];
   for (const p of clumped) {
-    let bg = null, bd = Infinity;
-    for (const g of groups) {
-      const d = Math.min(deltaE(p.lab, g.lab), deltaE(p.lab, g.halves[0]), deltaE(p.lab, g.halves[1])) / g.tolC;
-      if (d < bd) { bd = d; bg = g; }
-    }
+    // clump pills have no reliable size/shape, only colour: they belong to the main (largest)
+    // group unless another group's colour is clearly closer
+    const dOf = (g) => Math.min(deltaE(p.lab, g.lab), deltaE(p.lab, g.halves[0]), deltaE(p.lab, g.halves[1])) / g.tolC;
+    const main = groups.reduce((a, g) => (!a || g.count > a.count ? g : a), null);
+    let bg = main, bd = main ? dOf(main) : Infinity;
+    for (const g of groups) { const d = dOf(g); if (g !== main && d < 0.5 * bd && bd > 0.6) { bd = d; bg = g; } }
     if (bg && bd <= 1.8) { bg.pills.push(p); bg.count++; } else rest.push(p);
   }
   if (rest.length) groups.push(...groupSet(rest, unit));

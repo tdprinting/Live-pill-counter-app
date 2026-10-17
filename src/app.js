@@ -182,13 +182,15 @@ function computeDisplay() {
   const now = performance.now(); const stable = md.n >= 5 && recent.length >= 5 && last.conf >= 0.85;
   if (stable) { if (!S.stableSince) S.stableSince = now; } else S.stableSince = 0;
   const locked = stable && now - S.stableSince >= 1500;
-  let label = confLabel(conf, lo, hi, med);
-  if (md.n < recent.length && lo !== hi && !locked) label = `Estimate ${lo}–${hi} — hold steady`;
-  return { count: med, conf, range: [lo, hi], stability, locked, state: med === 0 ? "none" : locked ? "lock" : "hold", label };
+  // once frames agree and lock, the bar shows the engine's own certainty (not diluted by the window)
+  const confShown = locked ? last.conf : conf;
+  let label = confLabel(confShown, lo, hi, med);
+  if (md.n < recent.length && lo !== hi && !locked) label = `Estimate ${lo}–${hi}`;
+  return { count: med, conf: confShown, range: [lo, hi], stability, locked, state: med === 0 ? "none" : locked ? "lock" : "hold", label };
 }
 function confLabel(conf, lo, hi, n) {
   const w = hi - lo;
-  if (w === 0 && conf >= 0.8) return "Exact";
+  if (w === 0 && conf >= 0.8) return "Sure";
   if (w <= 2 && conf >= 0.5) return "Likely ±1";
   if (lo === hi) return `Estimate ~${hi}`;
   return `Estimate ${lo}–${hi}`;
@@ -228,70 +230,83 @@ let lastLocked = false;
 function renderHUD(d) {
   setRoll(d.count);
   const pct = Math.round(d.conf * 100);
-  $("#confPct").textContent = pct + "%";
-  $("#confLabel").textContent = d.label;
-  const f = $("#confFill"); f.style.width = pct + "%";
+  $("#confLabel").textContent = d.state === "scan" ? "Getting ready…" : d.label;
+  const f = $("#confFill"); f.style.width = (d.state === "scan" ? 0 : pct) + "%";
   f.style.setProperty("--c", d.conf >= 0.85 ? "var(--accent)" : d.conf >= 0.55 ? "var(--accent-2)" : d.conf >= 0.35 ? "var(--amber)" : "var(--alert)");
   $("#confBar").setAttribute("aria-valuenow", pct);
   const st = $("#state"); const txt = st.querySelector("span");
   st.className = "state " + (d.state === "lock" ? "lock" : d.state === "hold" ? "hold" : d.state === "cap" ? "cap" : "");
-  txt.textContent = d.state === "lock" ? "Locked" : d.state === "hold" ? "Hold steady" : d.state === "cap" ? (S.calibrating ? "Calibrating" : "Captured") : d.state === "none" ? "Looking for pills…" : "Scanning…";
+  txt.textContent = d.state === "lock" ? "Locked" : d.state === "hold" ? "Hold steady" : d.state === "cap" ? (S.calibrating ? "Calibrating" : "Captured") : "Counting…";
   if (d.locked !== lastLocked) { hud.classList.toggle("locked", d.locked); if (d.locked) { a11y(`Count locked at ${d.count}`); pcxBeep(); pcxSay(String(d.count)); } lastLocked = d.locked; }
   const sub = $("#sub");
-  sub.textContent = S.lock ? `Counting ${S.lock.row.name}${S.lock.row.strength ? " " + S.lock.row.strength : ""}` : (S.res && S.res.background ? S.res.background.name || "" : "");
+  sub.textContent = S.lock ? `Counting ${S.lock.row.name}${S.lock.row.strength ? " " + S.lock.row.strength : ""}` : (S.frozen && !matchMedia("(max-height:740px)").matches && S.res && S.res.background && S.res.background.name ? `On ${S.res.background.name} surface` : "");
   const c = $("#corr");
   if (d.adj) {
     c.hidden = false;
     const a = S.corr.adds.length, r = S.corr.removed.size;
     $("#corrTxt").textContent = [a ? `+${a} added` : "", r ? `−${r} removed` : ""].filter(Boolean).join(" · ");
   } else c.hidden = true;
-  pcxGoal(d); pcbBadge(); nbaHudChip();
+  pcxGoal(d); pcbBadge(); nbaHudChip(); pcuMeta();
 }
+// hide the small info row when nothing in it has content (saves panel height)
+function pcuMeta() { const m = $("#meta"); m.hidden = ![...m.children].some((c) => !c.hidden && c.textContent.trim()); }
 function a11y(msg) { let n = $("#live"); if (!n) { n = el("div", { id: "live", class: "vh", "aria-live": "polite" }); document.body.append(n); } n.textContent = msg; }
 
-/* ============================== banners & tips ============================== */
-const bannersEl = $("#banners"), tipsEl = $("#tips");
-let bannerSig = "";
-function renderBanners() {
-  const res = S.res; const parts = [];
+/* ============================== alerts (one compact pill, priority order) ============================== */
+const TIPS = {
+  dark: ["Too dark", "Turn on the light."],
+  pile: ["Pills are piled up", "Spread them out for an exact count."],
+  "white-on-white": ["White on white", "Use a dark or blue tray; white pills are hard to see on white."],
+  glare: ["Glare detected", "Tilt the tray or move the light."],
+  "low-contrast": ["Low contrast", "Try a plain, darker tray."],
+  noisy: ["Grainy image", "Add light and hold the phone steady."],
+};
+const TIP_ORDER = ["dark", "pile", "white-on-white", "glare", "low-contrast", "noisy"];
+const alertWrap = $("#alertWrap"), alertPill = $("#alert"), alertListEl = $("#alertList");
+let bannerSig = "", tipSig = "", alertOpen = false, lastOddMsg = "";
+const PCU_AIC = { odd: "!", hid: "", frag: "½", warn: "i" };
+function pcuAlertItems() {
+  const res = S.res, items = [];
   if (res) {
     const fl = flaggedInfo(res, S.frozen ? S.corr.removed : null);
     if (fl.n > 0) {
       const desc = fl.groups.map(pcDescribe).join(" + ");
-      parts.push({ k: "odd", title: `${fl.n} different pill${fl.n > 1 ? "s" : ""} found`, sub: S.lock ? `Not ${S.lock.row.name}: ${desc}` : desc });
+      items.push({ k: "odd", title: `${fl.n} different pill${fl.n > 1 ? "s" : ""}`, sub: S.lock ? `Not ${S.lock.row.name}: ${desc}` : desc });
     }
-    if (res.fragments.length) parts.push({ k: "frag", title: `${res.fragments.length} broken piece${res.fragments.length > 1 ? "s" : ""} (not counted)`, sub: "Partial tablets are shown with a crack marker" });
+    const hid = res.pills.reduce((n, p, i) => n + (p.hidden && !(S.frozen && S.corr.removed.has(i)) ? 1 : 0), 0);
+    if (hid > 0) items.push({ k: "hid", title: `${hid} hidden pill${hid > 1 ? "s" : ""} counted`, sub: "Estimated under other pills (dashed ghost outline)" });
+    if (res.fragments.length) items.push({ k: "frag", title: `${res.fragments.length} broken piece${res.fragments.length > 1 ? "s" : ""}`, sub: "Not counted (dashed amber outline)" });
+    const w = res.warnings || [];
+    for (const c of TIP_ORDER) if (w.includes(c)) items.push({ k: "warn", c, title: TIPS[c][0], sub: TIPS[c][1] });
   }
-  const sig = JSON.stringify(parts); if (sig === bannerSig) return; bannerSig = sig;
-  const oddP = parts.find((p) => p.k === "odd"); if (oddP) { pcxSay(`Warning. ${oddP.title}`); pcxBuzz([60, 40, 60]); a11y(oddP.title); }
-  bannersEl.textContent = "";
-  bannersEl.style.cssText = "display:flex;flex-direction:column;gap:6px";
-  for (const p of parts) {
-    bannersEl.append(el("div", { class: "banner glass " + p.k, role: "alert" },
-      el("div", { class: "bi", text: p.k === "odd" ? "!" : "½" }),
-      el("div", { class: "grow" }, p.title, el("small", { text: p.sub }))));
-  }
+  return items;
 }
-const TIPS = {
-  dark: ["🔦", "Too dark — turn on the light."],
-  pile: ["🧩", "Pills are piled up — spread them out for an exact count."],
-  "white-on-white": ["⚪", "White pills on a white surface are hard to see — use a dark or blue tray."],
-  glare: ["✨", "Glare detected — tilt the tray or move the light."],
-  "low-contrast": ["◐", "Low contrast — try a plain, darker tray."],
-  noisy: ["▒", "Image is grainy — add light and hold the phone steady."],
-};
-const TIP_ORDER = ["dark", "pile", "white-on-white", "glare", "low-contrast", "noisy"];
-let tipSig = "";
-function renderTips() {
-  const w = S.res ? S.res.warnings : []; const list = TIP_ORDER.filter((c) => w.includes(c)).slice(0, 2);
-  const sig = list.join(",") + S.torch.cap + S.torch.on; if (sig === tipSig) return; tipSig = sig;
-  tipsEl.textContent = "";
-  for (const c of list) {
-    const t = el("div", { class: "tip glass" }, el("span", { class: "t-i", text: TIPS[c][0] }), el("span", { style: "flex:1", text: TIPS[c][1] }));
-    if (c === "dark" && S.torch.cap) t.append(el("button", { text: S.torch.on ? "Light off" : "Light on", onclick: toggleTorch }));
-    tipsEl.append(t);
-  }
+function pcuAct(it) {
+  if (it.c === "dark" && S.torch.cap) return el("button", { class: "aact", text: S.torch.on ? "Light off" : "Light on", onclick: (e) => { e.stopPropagation(); toggleTorch(); } });
+  return null;
 }
+function renderBanners() {
+  const items = pcuAlertItems();
+  const sig = JSON.stringify(items) + S.torch.cap + S.torch.on + alertOpen; if (sig === bannerSig) return; bannerSig = sig;
+  const odd = items.find((p) => p.k === "odd");
+  if (odd && odd.title !== lastOddMsg) { pcxSay(`Warning. ${odd.title} found`); pcxBuzz([60, 40, 60]); a11y(odd.title + " found"); }
+  lastOddMsg = odd ? odd.title : "";
+  if (!items.length) { alertWrap.hidden = true; alertOpen = false; return; }
+  alertWrap.hidden = false;
+  const top = items[0], more = items.length - 1;
+  alertPill.dataset.k = top.k;
+  const ic = $("#alertIc"); ic.className = "aic " + top.k; ic.textContent = PCU_AIC[top.k];
+  $("#alertTxt").textContent = top.title;
+  $("#alertMore").textContent = more > 0 ? ` · +${more} more` : "";
+  const slot = $("#alertActSlot"); slot.textContent = ""; const act = pcuAct(top); if (act) slot.append(act);
+  $("#alertMain").setAttribute("aria-expanded", String(alertOpen));
+  alertListEl.hidden = !alertOpen; alertListEl.textContent = "";
+  if (alertOpen) for (const it of items) alertListEl.append(el("div", { class: "arow" }, el("span", { class: "aic " + it.k, text: PCU_AIC[it.k] }),
+    el("div", { class: "at" }, it.title, it.sub ? el("small", { text: it.sub }) : null), pcuAct(it)));
+}
+function renderTips() { renderBanners(); }
+$("#alertMain").addEventListener("click", () => { alertOpen = !alertOpen; bannerSig = ""; renderBanners(); });
+document.addEventListener("pointerdown", (e) => { if (alertOpen && !e.target.closest("#alertWrap")) { alertOpen = false; bannerSig = ""; renderBanners(); } }, true);
 
 /* ============================== marker tracking & overlay ============================== */
 let markers = [];
@@ -343,7 +358,7 @@ function resizeCanvas() {
   if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); }
   ctx.setTransform(cv.width / w, 0, 0, cv.height / h, 0, 0);
 }
-const PAL = { ok: "#19d3c5", med: "#7fe9df", low: "#ffc233", odd: "#ff4d5e", frag: "#ff8f3d", removed: "#9aa0a6", added: "#ffffff" };
+const PAL = { ok: "#19d3c5", med: "#7fe9df", low: "#ffc233", odd: "#ff4d5e", frag: "#ffb42e", removed: "#9aa0a6", added: "#ffffff" };
 function rr(c, x, y, w, h, r) { c.beginPath(); c.moveTo(x + r, y); c.arcTo(x + w, y, x + w, y + h, r); c.arcTo(x + w, y + h, x, y + h, r); c.arcTo(x, y + h, x, y, r); c.arcTo(x, y, x + w, y, r); c.closePath(); }
 function chip(c, text, x, y, bg, fg = "#fff") {
   c.save(); c.font = "700 11px -apple-system, system-ui, sans-serif"; const w = c.measureText(text).width + 14;
@@ -373,8 +388,8 @@ function frame(now) {
   pcxAutoTick(now);
 }
 function drawReticle(V, t) {
-  const w = Math.min(V.cw, V.ch) * 0.62, x = V.cw / 2 - w / 2, y = V.ch * 0.46 - w / 2, l = 26 + (RM ? 0 : Math.sin(t * 2) * 3);
-  ctx.save(); ctx.strokeStyle = "rgba(255,255,255,.75)"; ctx.lineWidth = 3; ctx.lineCap = "round";
+  const w = Math.min(V.cw, V.ch) * 0.62, x = V.cw / 2 - w / 2, y = V.ch * 0.4 - w / 2, l = 24 + (RM ? 0 : Math.sin(t * 2) * 2);
+  ctx.save(); ctx.strokeStyle = "rgba(255,255,255,.6)"; ctx.lineWidth = 2; ctx.lineCap = "round";
   for (const [cx, cy, sx, sy] of [[x, y, 1, 1], [x + w, y, -1, 1], [x, y + w, 1, -1], [x + w, y + w, -1, -1]]) {
     ctx.beginPath(); ctx.moveTo(cx, cy + sy * l); ctx.lineTo(cx, cy); ctx.lineTo(cx + sx * l, cy); ctx.stroke();
   }
@@ -384,53 +399,46 @@ function drawPill(V, m, t) {
   const x = V.ox + m.x * V.s, y = V.oy + m.y * V.s, A = m.a * V.s, B = m.b * V.s;
   const removed = S.frozen && S.corr.removed.has(m.i);
   if (m.hid && !removed) { nbaDrawGhost(x, y, A, B, m, t); return; }
-  const st = removed ? "removed" : m.st, col = PAL[st];
+  const st = removed ? "removed" : m.st, col = PAL[st], hw = PCX.o.contrast ? 1.4 : 0;
   ctx.save(); ctx.globalAlpha = pcClamp(m.alpha, 0, 1);
   ctx.translate(x, y);
-  const sc = RM ? 1 : 0.85 + 0.15 * m.alpha; ctx.scale(sc, sc);
-  if (st === "odd") {
-    const p = RM ? 0.35 : ((t + m.seed) % 1.4) / 1.4, rf = 1.15 + p * 0.9;
-    ctx.save(); ctx.rotate(m.th); ctx.strokeStyle = col; ctx.globalAlpha *= RM ? 0.7 : 0.85 * (1 - p); ctx.lineWidth = 3;
-    ctx.beginPath(); ctx.ellipse(0, 0, A * rf + 4, B * rf + 4, 0, 0, Math.PI * 2); ctx.stroke(); ctx.restore();
-  }
+  const sc = RM ? 1 : 0.9 + 0.1 * m.alpha; ctx.scale(sc, sc);
   ctx.rotate(m.th);
-  const ea = A + 2, eb = B + 2;
-  ctx.beginPath(); ctx.ellipse(0, 0, ea, eb, 0, 0, Math.PI * 2);
-  ctx.fillStyle = col + (PCX.o.contrast ? "55" : st === "odd" ? "40" : "1c"); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(0, 0, A + 2, B + 2, 0, 0, Math.PI * 2);
+  if (st === "odd" || PCX.o.contrast) { ctx.fillStyle = col + (PCX.o.contrast ? "44" : "26"); ctx.fill(); }
   ctx.lineJoin = "round";
-  if (st === "low" || st === "removed") { ctx.setLineDash([7, 5]); ctx.lineDashOffset = RM ? 0 : -t * 14; }
-  const hw = PCX.o.contrast ? 1.8 : 0;
-  ctx.strokeStyle = PCX.o.contrast ? "#000" : "rgba(0,0,0,.45)"; ctx.lineWidth = 5 + hw * 1.5; ctx.stroke();
-  ctx.strokeStyle = col; ctx.lineWidth = (st === "odd" ? 3.2 : st === "med" ? 2 : 2.6) + hw; ctx.stroke();
+  if (st === "removed") ctx.setLineDash([6, 5]);
+  ctx.strokeStyle = PCX.o.contrast ? "#000" : "rgba(0,0,0,.3)"; ctx.lineWidth = 3.4 + hw * 1.5; ctx.stroke();
+  ctx.strokeStyle = col; ctx.lineWidth = (st === "odd" ? 2.6 : st === "low" ? 2 : 1.5) + hw; ctx.stroke();
   ctx.setLineDash([]);
   ctx.rotate(-m.th);
-  if (removed) { const r = Math.min(A, B) * 0.55; ctx.strokeStyle = "#fff"; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(-r, -r); ctx.lineTo(r, r); ctx.moveTo(r, -r); ctx.lineTo(-r, r); ctx.stroke(); }
-  else if (S.frozen && m.idx) {
-    const fs = pcClamp(Math.min(A, B) * 0.95, 10, 22); ctx.font = `700 ${fs}px -apple-system, system-ui, sans-serif`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  if (removed) { const r = Math.min(A, B) * 0.55; ctx.strokeStyle = "#fff"; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.moveTo(-r, -r); ctx.lineTo(r, r); ctx.moveTo(r, -r); ctx.lineTo(-r, r); ctx.stroke(); }
+  else if (S.frozen && m.idx && !PCX.groupsOn) {
+    const fs = pcClamp(Math.min(A, B) * 0.95, 11, 22); ctx.font = `700 ${fs}px -apple-system, system-ui, sans-serif`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
     ctx.lineWidth = 4; ctx.strokeStyle = "rgba(0,0,0,.65)"; ctx.strokeText(m.idx, 0, 1); ctx.fillStyle = "#fff"; ctx.fillText(m.idx, 0, 1);
   }
   ctx.restore();
-  if (st === "odd" && m.alpha > 0.5) chip(ctx, "DIFFERENT", x, y - Math.max(A, B) - 12, PAL.odd);
-  else if (st === "low" && S.frozen && m.alpha > 0.5) chip(ctx, "UNSURE", x, y - Math.max(A, B) - 10, "rgba(120,80,0,.85)", "#ffd36b");
+  if (st === "odd" && m.alpha > 0.4) { // small "!" dot on the upper right of the odd pill
+    const d = Math.max(A, B) * 0.78, px = x + d, py = y - d;
+    ctx.save(); ctx.globalAlpha = pcClamp(m.alpha, 0, 1); ctx.beginPath(); ctx.arc(px, py, 9, 0, Math.PI * 2); ctx.fillStyle = PAL.odd; ctx.fill();
+    ctx.lineWidth = 1.5; ctx.strokeStyle = "#fff"; ctx.stroke(); ctx.font = "800 12px -apple-system, system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillStyle = "#fff"; ctx.fillText("!", px, py + 0.5); ctx.restore();
+  }
 }
 function drawFrag(V, m) {
   const x = V.ox + m.x * V.s, y = V.oy + m.y * V.s, A = m.a * V.s, B = m.b * V.s;
   ctx.save(); ctx.globalAlpha = pcClamp(m.alpha, 0, 1); ctx.translate(x, y); ctx.rotate(m.th);
   ctx.beginPath(); ctx.ellipse(0, 0, A + 3, B + 3, 0, 0, Math.PI * 2);
-  ctx.setLineDash([2, 5]); ctx.lineCap = "round"; ctx.strokeStyle = "rgba(0,0,0,.5)"; ctx.lineWidth = 5; ctx.stroke();
-  ctx.strokeStyle = PAL.frag; ctx.lineWidth = 3; ctx.stroke(); ctx.setLineDash([]);
-  const r = Math.max(A, B) * 0.7; ctx.beginPath(); ctx.moveTo(-r * 0.15, -r * 0.8);
-  [[0.1, -0.4], [-0.15, -0.1], [0.12, 0.25], [-0.05, 0.8]].forEach(([a, b]) => ctx.lineTo(a * r, b * r));
-  ctx.strokeStyle = "rgba(0,0,0,.5)"; ctx.lineWidth = 4.5; ctx.stroke(); ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.stroke();
+  ctx.setLineDash([6, 4]); ctx.lineCap = "round"; ctx.strokeStyle = "rgba(0,0,0,.3)"; ctx.lineWidth = 3.4; ctx.stroke();
+  ctx.strokeStyle = PAL.frag; ctx.lineWidth = 2; ctx.stroke(); ctx.setLineDash([]);
   ctx.restore();
 }
 function drawAdded(V, p, t) {
   const x = V.ox + p.x * V.s, y = V.oy + p.y * V.s, r = p.r * V.s;
   ctx.save(); ctx.translate(x, y); const pop = RM ? 1 : Math.min(1, (performance.now() - p.t) / 250), s = 0.6 + 0.4 * (1 - Math.pow(1 - pop, 3)); ctx.scale(s, s);
-  ctx.beginPath(); ctx.arc(0, 0, r + 2, 0, Math.PI * 2); ctx.fillStyle = "rgba(255,255,255,.15)"; ctx.fill();
-  ctx.strokeStyle = "rgba(0,0,0,.5)"; ctx.lineWidth = 5; ctx.stroke(); ctx.strokeStyle = "#fff"; ctx.lineWidth = 2.6; ctx.stroke();
-  const q = r * 0.45; ctx.strokeStyle = "#fff"; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(-q, 0); ctx.lineTo(q, 0); ctx.moveTo(0, -q); ctx.lineTo(0, q); ctx.stroke();
-  ctx.restore(); chip(ctx, "ADDED", x, y - r - 12, "rgba(30,30,30,.85)");
+  ctx.beginPath(); ctx.arc(0, 0, r + 2, 0, Math.PI * 2); ctx.fillStyle = "rgba(255,255,255,.12)"; ctx.fill();
+  ctx.strokeStyle = "rgba(0,0,0,.3)"; ctx.lineWidth = 3.4; ctx.stroke(); ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.stroke();
+  const q = r * 0.45; ctx.strokeStyle = "#fff"; ctx.lineWidth = 2.4; ctx.beginPath(); ctx.moveTo(-q, 0); ctx.lineTo(q, 0); ctx.moveTo(0, -q); ctx.lineTo(0, q); ctx.stroke();
+  ctx.restore();
 }
 function drawTray(V, dt, now) {
   const tr = S.mode === "tray" && S.res && S.res.tray && !S.roi ? S.res.tray : null;
@@ -590,18 +598,15 @@ function nbaMmNorm() { // millimetres per normalised image (long side): LiDAR fi
   return S.mmPerNorm;
 }
 function nbaHudChip() {
-  let c = $("#nbaChip");
-  if (!c) { const sub = $("#sub"); c = el("span", { id: "nbaChip", text: "LiDAR", style: "display:block;width:fit-content;align-self:flex-start;font-size:11px;font-weight:700;letter-spacing:.04em;margin-top:2px;padding:1px 8px;border-radius:9px;background:var(--accent);color:var(--accent-ink)" }); sub.parentNode.insertBefore(c, sub.nextSibling); }
-  const on = nbaDepthUsed(); c.hidden = !on;
+  const c = $("#nbaChip"), on = nbaDepthUsed(); c.hidden = !on;
   const cal = $("#btnCal"); if (cal) cal.hidden = on; // LiDAR gives mm directly: no coin calibration needed
 }
 function nbaDrawGhost(x, y, A, B, m, t) {
   ctx.save(); ctx.globalAlpha = pcClamp(m.alpha, 0, 1) * 0.9; ctx.translate(x, y); ctx.rotate(m.th);
   ctx.beginPath(); ctx.ellipse(0, 0, A + 2, B + 2, 0, 0, Math.PI * 2);
-  ctx.fillStyle = "rgba(255,255,255,.08)"; ctx.fill();
-  ctx.setLineDash([6, 5]); ctx.lineDashOffset = RM ? 0 : -t * 10; ctx.strokeStyle = "rgba(0,0,0,.45)"; ctx.lineWidth = 4.5; ctx.stroke();
-  ctx.strokeStyle = "rgba(255,255,255,.85)"; ctx.lineWidth = 2; ctx.stroke(); ctx.setLineDash([]); ctx.restore();
-  if (m.alpha > 0.5) chip(ctx, "under", x, y, "rgba(30,30,30,.75)", "#dfe6ea");
+  ctx.fillStyle = "rgba(255,255,255,.06)"; ctx.fill();
+  ctx.setLineDash([5, 5]); ctx.lineDashOffset = RM ? 0 : -t * 8; ctx.strokeStyle = "rgba(0,0,0,.3)"; ctx.lineWidth = 3.4; ctx.stroke();
+  ctx.strokeStyle = "rgba(255,255,255,.8)"; ctx.lineWidth = 1.5; ctx.stroke(); ctx.setLineDash([]); ctx.restore();
 }
 // #demo-lidar: flat tray plane at 0.28 m, pills raised ~3.5 mm, fx = fy = pxPerMm * 280 (demo image pixels)
 const NBA_DEMO_PXMM = 5.2;
@@ -773,13 +778,12 @@ async function pcbBurst() {
   return true;
 }
 function pcbBadge() {
-  let b = $("#pcbBadge");
-  if (!b) { const sub = $("#sub"); b = el("div", { id: "pcbBadge", style: "font-size:12px;font-weight:600;margin-top:2px" }); sub.parentNode.insertBefore(b, sub.nextSibling); }
+  const b = $("#pcbBadge");
   const B = S.frozen && S.burst;
   if (!B) { b.hidden = true; return; }
   const all = B.agree === B.n && B.n > 1;
   b.hidden = false;
-  b.textContent = (B.n < 2 ? "1 frame" : all ? `${B.n}/${B.n} frames agree` : B.agree > 1 ? `${B.agree}/${B.n} frames agree` : "frames disagree — hold steady and recount") + (B.estimate ? " · estimate" : "");
+  b.textContent = (B.n < 2 ? "1 frame" : all ? `${B.n}/${B.n} frames agree` : B.agree > 1 ? `${B.agree}/${B.n} frames agree` : "Frames disagree — recount") + (B.estimate ? " · estimate" : "");
   b.style.color = all ? "var(--accent)" : B.agree > 1 ? "var(--accent-2)" : "var(--amber)";
 }
 function freezeWith(canvas) {
@@ -803,7 +807,7 @@ async function analyseStill(save, pre) {
     if (save && !S.calibrating) saveHistory(true);
     scheduleId(true);
     if (S.calibrating) showGuide(`Tap the ${S.calibrating.label} in the photo`);
-    else if (res.total > 0) setHint("Tap a marker to remove it · tap empty space to add a pill");
+    else if (res.total > 0) setHint("Tap a pill to remove · tap empty space to add");
     if (!S.calibrating) { const fd = frozenDisplay(), fn = flaggedInfo(res, S.corr.removed).n; pcxSay(`${fd.count} pill${fd.count === 1 ? "" : "s"}${fn ? `. ${fn} different pill${fn > 1 ? "s" : ""} found` : ""}`); }
   } catch (e) {
     toast("Could not analyse this image");
@@ -915,15 +919,31 @@ $("#modeSeg").addEventListener("click", (e) => { const b = e.target.closest("but
 /* ============================== toast / hint / modal ============================== */
 let toastT;
 function toast(msg, ms = 2600) { const t = $("#toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove("show"), ms); }
-function setHint(txt) { const h = $("#hint"); h.hidden = !txt; h.textContent = txt || ""; }
+function setHint(txt) { const h = $("#hint"); h.hidden = !txt; h.textContent = txt || ""; pcuMeta(); }
 function updateHint() {
   if (S.frozen) return;
   if (!S.res) return setHint("");
   setHint(S.res.total === 0 ? (S.mode === "tray" ? "Frame the whole tray in view" : "Point the camera at the pills") : "");
 }
-function openModal(node) { const w = $("#modalWrap"), m = $("#modal"); m.textContent = ""; m.append(node); w.hidden = false; }
-function closeModal() { $("#modalWrap").hidden = true; }
+function openModal(node) { const w = $("#modalWrap"), m = $("#modalBody"); m.textContent = ""; m.append(node); m.scrollTop = 0; $("#modal").style.transform = ""; w.hidden = false; }
+function closeModal() { $("#modalWrap").hidden = true; $("#modal").style.transform = ""; }
 $("#modalWrap").addEventListener("click", (e) => { if (e.target.id === "modalWrap") closeModal(); });
+// swipe down on the handle (or on the sheet while scrolled to the top) to dismiss
+(function pcuModalDrag() {
+  const m = $("#modal"), g = $("#modalGrab"), b = $("#modalBody"); let d = null;
+  const start = (e) => { if (e.target.closest("input,button,a,canvas")) return; d = { y0: e.clientY, dy: 0, t: performance.now(), on: false, pid: e.pointerId }; };
+  const move = (e) => {
+    if (!d || e.pointerId !== d.pid) return; const dy = e.clientY - d.y0;
+    if (!d.on && dy > 8 && (e.currentTarget === g || b.scrollTop <= 0)) { d.on = true; m.classList.add("drag"); try { e.currentTarget.setPointerCapture(e.pointerId); } catch {} }
+    if (d.on) { d.dy = Math.max(0, dy); m.style.transform = `translateY(${d.dy}px)`; }
+  };
+  const end = () => {
+    if (!d) return; const x = d; d = null; m.classList.remove("drag");
+    if (!x.on) return; const v = x.dy / Math.max(1, performance.now() - x.t);
+    if (x.dy > 90 || v > 0.6) closeModal(); else m.style.transform = "";
+  };
+  for (const n of [g, b]) { n.addEventListener("pointerdown", start); n.addEventListener("pointermove", move); n.addEventListener("pointerup", end); n.addEventListener("pointercancel", end); }
+})();
 
 /* ============================== calibration ============================== */
 const REFS = [{ key: "quarter", label: "US quarter", mm: 24.26 }, { key: "penny", label: "US penny", mm: 19.05 }];
@@ -959,7 +979,7 @@ function calibrateAt(x, y) {
   toast(`Calibrated: ${(ref.mm / major).toFixed(3)} mm per pixel. Remove the ${ref.label} before counting.`, 4200);
   analyseStill(false);
 }
-$("#btnCal").addEventListener("click", openCalibrate);
+$("#btnCal").addEventListener("click", () => (PCI.on ? pciOpenCal() : openCalibrate()));
 $("#btnArea").addEventListener("click", startRoi);
 $("#btnTorch").addEventListener("click", toggleTorch);
 
@@ -1032,12 +1052,14 @@ async function refreshId() {
   idBusy = false; renderPeek(g); renderSheet(g);
 }
 function renderPeek(g) {
-  const ic = $("#peekIcon");
-  if (!g) { drawPillIcon(ic, { shape: "round", cssColors: ["rgba(128,128,128,.3)"] }); $("#peekTitle").textContent = "Identify"; $("#peekSub").textContent = "Count pills to see matches"; return; }
+  const ic = $("#peekIcon"), il = $("#idLine"), it = $("#idLineTxt");
+  if (!g) { drawPillIcon(ic, { shape: "round", cssColors: ["rgba(128,128,128,.3)"] }); $("#peekTitle").textContent = "Identify"; $("#peekSub").textContent = "Count pills to see matches"; il.hidden = true; return; }
   drawPillIcon(ic, iconForGroup(g));
   const best = S.lock ? S.lock.row : S.idRows[0];
-  $("#peekTitle").textContent = best ? `${S.lock ? "Locked: " : "Likely: "}${best.name}${best.strength ? " " + best.strength : ""}` : pcDescribe(g);
-  $("#peekSub").textContent = S.lock ? "Counting only this drug" : best ? "Confirm with the imprint — swipe up" : "Swipe up to identify";
+  const name = best ? `${best.name}${best.strength ? " " + best.strength : ""}` : "";
+  $("#peekTitle").textContent = best ? `${S.lock ? "Locked: " : "Likely: "}${name}` : pcDescribe(g);
+  $("#peekSub").textContent = S.lock ? "Counting only this drug" : best ? "Confirm with the imprint" : "Type an imprint to identify";
+  il.hidden = false; it.textContent = best ? `${S.lock ? "Locked: " : "Likely: "}${name}` : `${pcDescribe(g)} · identify`;
 }
 function rowCard(r, i, kind) {
   const c = el("div", { class: "card" + (kind === "best" ? " best" : ""), style: `animation-delay:${Math.min(i, 8) * 40}ms` });
@@ -1101,26 +1123,29 @@ function unlockDrug() {
   if (S.frozen) { syncMarkers(S.res, true); refreshFrozenUI(); } refreshId();
 }
 
-/* ---- sheet drag / toggle ---- */
+/* ---- identification sheet: open / close, drag down or tap outside to dismiss ---- */
 const sheet = $("#sheet"), head = $("#sheetHead");
-function sheetMetrics() { const peek = head.offsetHeight; return { max: Math.max(0, sheet.offsetHeight - peek), peek }; }
 function toggleSheet(open) {
   S.sheetOpen = open == null ? !S.sheetOpen : open; sheet.style.transform = ""; document.body.classList.toggle("sheet-open", S.sheetOpen);
+  sheet.setAttribute("aria-hidden", String(!S.sheetOpen));
   if (S.sheetOpen) scheduleId(true);
 }
 let sd = null;
-head.addEventListener("pointerdown", (e) => { const m = sheetMetrics(); sd = { y0: e.clientY, base: S.sheetOpen ? 0 : m.max, max: m.max, moved: false, t: performance.now(), y: e.clientY }; head.setPointerCapture(e.pointerId); });
+head.addEventListener("pointerdown", (e) => { if (e.target.closest("button")) return; sd = { y0: e.clientY, dy: 0, t: performance.now(), moved: false }; try { head.setPointerCapture(e.pointerId); } catch {} });
 head.addEventListener("pointermove", (e) => {
   if (!sd) return; const dy = e.clientY - sd.y0; if (Math.abs(dy) > 5) { sd.moved = true; sheet.classList.add("drag"); }
-  sd.y = e.clientY; if (sd.moved) sheet.style.transform = `translateY(${pcClamp(sd.base + dy, 0, sd.max)}px)`;
+  sd.dy = Math.max(0, dy); if (sd.moved) sheet.style.transform = `translateY(${sd.dy}px)`;
 });
-function endSheetDrag(e) {
+function endSheetDrag() {
   if (!sd) return; const d = sd; sd = null; sheet.classList.remove("drag");
-  if (!d.moved) return toggleSheet();
-  const dy = d.y - d.y0, v = dy / Math.max(1, performance.now() - d.t); const pos = pcClamp(d.base + dy, 0, d.max);
-  toggleSheet(Math.abs(v) > 0.4 ? v < 0 : pos < d.max / 2);
+  if (!d.moved) return;
+  const v = d.dy / Math.max(1, performance.now() - d.t);
+  if (d.dy > 90 || v > 0.6) toggleSheet(false); else sheet.style.transform = "";
 }
 head.addEventListener("pointerup", endSheetDrag); head.addEventListener("pointercancel", endSheetDrag);
+$("#sheetScrim").addEventListener("click", () => toggleSheet(false));
+$("#sheetClose").addEventListener("click", () => toggleSheet(false));
+$("#idLine").addEventListener("click", () => toggleSheet(true));
 
 /* ============================== fallback screen ============================== */
 function showFallback(title, msg, why) {
@@ -1144,7 +1169,7 @@ $("#fbRetry").addEventListener("click", () => boot());
 $("#shutter").addEventListener("click", capture);
 $("#retake").addEventListener("click", retake);
 document.addEventListener("visibilitychange", () => { if (!document.hidden && video.srcObject && video.paused) video.play().catch(() => {}); });
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeModal(); toggleSheet(false); } if (e.key === " " && e.target === document.body && !PCI.on) { e.preventDefault(); S.frozen ? retake() : capture(); } });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeModal(); toggleSheet(false); if (!$("#onb").hidden) $("#onbSkip").click(); } if (e.key === " " && e.target === document.body && !PCI.on) { e.preventDefault(); S.frozen ? retake() : capture(); } });
 
 /* ============================== extras: target, tally, groups, voice, record, recount, settings ============================== */
 const PCX = {
@@ -1201,25 +1226,22 @@ const pcxClampPct = (x) => (isFinite(x) ? pcClamp(x, 0, 1) : 0);
 function pcxGoal(d) {
   PCX.lastD = d;
   const t = PCX.target, tally = pcxTallySum(), total = d.count + tally;
-  const goal = $("#goal"), rw = $("#ringWrap"), v = $("#verify");
+  const goal = $("#goal"), gof = $("#goalOf"), v = $("#verify");
   $("#chipQtyV").textContent = t ? String(t) : "set";
-  if (!t) { goal.hidden = true; rw.hidden = true; PCX.hit = false; }
+  if (!t) { goal.hidden = true; gof.hidden = true; PCX.hit = false; }
   else {
-    const diff = t - total, pct = pcxClampPct(total / t);
+    const diff = t - total;
     const exact = diff === 0 && d.count > 0 && ((d.locked && d.conf >= 0.85) || (S.frozen && (d.conf >= 0.8 || d.adj)));
     const cls = diff === 0 ? "ok" : diff > 0 ? "add" : "rem";
-    const tx = diff === 0 ? (exact ? `✓ ${t} exactly` : `At ${t}, confirming…`) : diff > 0 ? `Add ${diff}` : `Remove ${-diff}`;
-    goal.hidden = false; goal.className = "goal " + cls; goal.textContent = tx + (tally ? ` · tally ${tally}` : "");
-    rw.hidden = false;
-    const prg = $("#ringPrg"); prg.style.strokeDashoffset = String(138.2 * (1 - pct));
-    prg.style.setProperty("--rc", diff === 0 ? "var(--accent)" : diff > 0 ? "var(--amber)" : "var(--alert)");
-    $("#ringTxt").textContent = diff < 0 ? "+" + (-diff) : Math.round(pct * 100) + "%";
+    const tx = diff === 0 ? (exact ? `✓ Exactly ${t}` : `At ${t}, confirming…`) : diff > 0 ? `Add ${diff}` : `Remove ${-diff}`;
+    goal.hidden = false; goal.className = "goal " + cls; goal.textContent = tx;
+    gof.hidden = false; gof.textContent = `of ${t}` + (tally ? ` (tally ${tally})` : "");
     if (exact && !PCX.hit) { PCX.hit = true; pcxSuccess(total); }
     else if (diff !== 0) PCX.hit = false;
   }
   if (S.frozen && PCX.verify) {
     v.hidden = false; v.className = "verify " + PCX.verify.state;
-    v.textContent = PCX.verify.state === "ok" ? "✓✓ Verified ×2" : `≠ Recount ${PCX.verify.now} vs ${PCX.verify.prev}`;
+    v.textContent = PCX.verify.state === "ok" ? "✓ Verified ×2" : `Recount ${PCX.verify.now} vs ${PCX.verify.prev}`;
   } else v.hidden = true;
   const key = (S.frozen ? "c" : "l") + total + "|" + (t ? t - total : "");
   if (d.locked || S.frozen) {
@@ -1610,17 +1632,21 @@ function pciRenderLive(steady) {
   const sig = v ? [v.colors.join("/"), v.shape, v.two, v.len ? Math.round(v.len * 2) : 0, PCI.cal ? 1 : 0, PCX.o.units].join("|") : "none";
   if (sig !== PCI.sig) {
     PCI.sig = sig; const tr = $("#idTraits"); tr.textContent = "";
-    drawPillIcon($("#idIcon"), pciIconFor(v), 64);
-    if (!v) tr.append(el("span", { class: "chip", text: "No pill yet" }));
+    drawPillIcon($("#idIcon"), pciIconFor(v), 56);
+    if (!v) tr.append(el("span", { text: "No pill yet", style: "color:var(--muted)" }));
     else {
-      v.colors.forEach((c, i) => tr.append(el("span", { class: "chip" }, el("i", { class: "sw", style: `background:${v.g.halvesRgb && v.g.halvesRgb[i] ? rgbCss(v.g.halvesRgb[i]) : colorHex(c)}` }), c)));
-      if (!v.colors.length) tr.append(el("span", { class: "chip", text: "colour?" }));
-      if (v.two && v.colors.length < 2) tr.append(el("span", { class: "chip", text: "two-tone" }));
-      if (v.shape) tr.append(el("span", { class: "chip", text: v.shape }));
-      tr.append(v.len ? el("span", { class: "chip num", text: pcxLen(v.len) }) : el("button", { class: "chip link", text: "Add a coin for size", onclick: pciOpenCal }));
+      const cap = (x) => x.charAt(0).toUpperCase() + x.slice(1);
+      const parts = [...v.colors.map(cap)];
+      if (!v.colors.length) parts.push("Colour?");
+      if (v.two && v.colors.length < 2) parts.push("two-tone");
+      if (v.shape) parts.push(parts.length ? v.shape : cap(v.shape));
+      if (v.len) parts.push(pcxLen(v.len));
+      const sw = v.colors.slice(0, 2).map((c, i) => el("i", { class: "sw", style: `background:${v.g.halvesRgb && v.g.halvesRgb[i] ? rgbCss(v.g.halvesRgb[i]) : colorHex(c)}` }));
+      tr.append(el("span", null, ...sw, parts.join(" · ")));
+      if (!v.len) tr.append(el("button", { class: "linkbtn", text: "Add a coin for size ›", onclick: pciOpenCal }));
     }
   }
-  const txt = !v ? "Looking for a pill…" : steady ? "Got it ✓" : "Steady…";
+  const txt = !v ? "Looking for a pill…" : steady ? "Got it" : "Hold still…";
   if ($("#idStateTxt").textContent !== txt) $("#idStateTxt").textContent = txt;
   st.className = "idstate " + (steady ? "ok" : v ? "hold" : "");
   const fill = $("#idSteady"); fill.style.width = Math.round((steady ? 1 : PCI.steady * 0.9) * 100) + "%"; fill.style.setProperty("--c", steady ? "var(--accent)" : "var(--amber)");
@@ -1634,7 +1660,7 @@ function pciRenderPicks() {
   cs.forEach((c, i) => {
     const kind = pciKind(c.g), on = PCI.pick ? PCI.pick === kind : !!cur && pciKind(cur) === kind;
     const ic = el("canvas"); drawPillIcon(ic, iconForGroup(c.g), 28);
-    box.append(el("button", { class: "pchip glass", "aria-pressed": String(on), "aria-label": `Pill ${i + 1}: ${pcDescribe(c.g)}`, onclick: () => { PCI.pick = PCI.pick === kind ? null : kind; PCI.frames = []; PCI.best = null; PCI.live = null; PCI.pickSig = ""; PCI.sig = ""; pciRenderLive(false); } }, ic, `${i + 1} · ${pcDescribe(c.g)}`));
+    box.append(el("button", { class: "pchip", "aria-pressed": String(on), "aria-label": `Pill ${i + 1}: ${pcDescribe(c.g)}`, onclick: () => { PCI.pick = PCI.pick === kind ? null : kind; PCI.frames = []; PCI.best = null; PCI.live = null; PCI.pickSig = ""; PCI.sig = ""; pciRenderLive(false); } }, ic, `${i + 1} · ${pcDescribe(c.g)}`));
   });
 }
 function pciSetPrompt() {
@@ -1741,17 +1767,18 @@ function pciInsert(txt, back) {
   inp.dispatchEvent(new Event("input"));
 }
 function pciShowRes() {
-  const fr = PCI.fr, R = $("#idRes"); $("#idPanel").hidden = true; $("#idPrompt").hidden = true; R.hidden = false; R.textContent = "";
+  const fr = PCI.fr, R = $("#idRes"); $("#idPanel").hidden = true; $("#idPrompt").hidden = true; R.hidden = false; R.textContent = ""; R.classList.remove("big");
   const two = fr.sides.length > 1;
   const zoom = el("canvas", { id: "idZoom", role: "img", "aria-label": "Magnified, contrast-enhanced pill for reading the imprint" });
-  const tabs = two ? el("div", { class: "idsides" }, ["Side A", "Side B"].map((t, i) => el("button", { class: "pchip", text: t, "aria-pressed": String(PCI.act === i), onclick: (e) => { PCI.act = i; PCI.fi = i; tabs.querySelectorAll("button").forEach((b, k) => b.setAttribute("aria-pressed", String(k === i))); pciSyncTools(); pciPrepDraw(); } }))) : null;
+  const tabs = two ? el("div", { class: "idsides" }, ["Side A", "Side B"].map((t, i) => el("button", { class: "pchip", text: t, "aria-pressed": String(PCI.act === i), onclick: () => { PCI.act = i; PCI.fi = i; tabs.querySelectorAll("button").forEach((b, k) => b.setAttribute("aria-pressed", String(k === i))); pciSyncTools(); pciPrepDraw(); } }))) : null;
   const bEnh = el("button", { class: "pchip", text: "Enhance", "aria-pressed": "true", onclick: () => { const s = fr.sides[PCI.act]; s.enh = !s.enh; pciSyncTools(); pciDrawZoom(); } });
   const bInv = el("button", { class: "pchip", text: "Invert", "aria-pressed": "false", onclick: () => { const s = fr.sides[PCI.act]; s.inv = !s.inv; pciSyncTools(); pciDrawZoom(); } });
-  const bRot = el("button", { class: "pchip", text: "Rotate ↻", onclick: () => { const v = fr.sides[PCI.act].view; v.rot = (v.rot + 90) % 360; pciDrawZoom(); } });
-  const bRst = el("button", { class: "pchip", text: "Reset", onclick: () => { Object.assign(fr.sides[PCI.act].view, { z: 1, x: 0, y: 0, rot: 0 }); pciDrawZoom(); } });
+  const bFlip = el("button", { class: "pchip", text: two ? "Re-scan side" : "Flip pill", "aria-pressed": "false", onclick: pciFlip });
+  const bRot = el("button", { "aria-label": "Rotate", text: "↻", onclick: () => { const v = fr.sides[PCI.act].view; v.rot = (v.rot + 90) % 360; pciDrawZoom(); } });
+  const bRst = el("button", { "aria-label": "Reset zoom", text: "⟲", onclick: () => { Object.assign(fr.sides[PCI.act].view, { z: 1, x: 0, y: 0, rot: 0 }); pciDrawZoom(); } });
   PCI.sync = () => { const s = fr.sides[PCI.act]; bEnh.setAttribute("aria-pressed", String(s.enh)); bInv.setAttribute("aria-pressed", String(s.inv)); };
   const mkInp = (i) => {
-    const inp = el("input", { class: "idinp", type: "text", placeholder: i ? "Imprint on the other side" : "e.g. 894 5", autocapitalize: "characters", autocomplete: "off", autocorrect: "off", spellcheck: "false", enterkeyhint: "search", "aria-label": `Imprint, side ${i ? "B" : "A"}` });
+    const inp = el("input", { class: "idinp", type: "text", placeholder: i ? "Imprint on the other side" : "Type the imprint, e.g. 894 5", autocapitalize: "characters", autocomplete: "off", autocorrect: "off", spellcheck: "false", enterkeyhint: "search", "aria-label": `Imprint, side ${i ? "B" : "A"}` });
     inp.value = PCI.imp[i];
     inp.addEventListener("focus", () => { PCI.fi = i; if (fr.sides[i] && PCI.act !== i) { PCI.act = i; if (tabs) tabs.querySelectorAll("button").forEach((b, k) => b.setAttribute("aria-pressed", String(k === i))); pciSyncTools(); pciPrepDraw(); } });
     inp.addEventListener("input", () => { PCI.imp[i] = inp.value; clearTimeout(PCI.timer); PCI.timer = setTimeout(pciRunId, 350); });
@@ -1761,22 +1788,27 @@ function pciShowRes() {
   const key = (label, txt, back) => el("button", { text: label, "aria-label": back ? "Backspace" : label === "␣" ? "Space" : label, onclick: () => pciInsert(txt, back) });
   const keys = el("div", { class: "keys", role: "group", "aria-label": "Quick characters" },
     key("␣", " "), key("/", "/"), key("·", "·"), key("-", "-"), key("+", "+"), key("&", "&"), ["0", "O", "1", "I", "5", "S", "8", "B"].map((c) => key(c, c)), key("⌫", "", true),
-    el("button", { text: "Clear", style: "font-family:var(--font);font-size:.9rem", onclick: () => { const i = PCI.fi; PCI.inps[i].value = ""; PCI.inps[i].dispatchEvent(new Event("input")); PCI.inps[i].focus(); } }));
-  const g = fr.group, ic = el("canvas"); drawPillIcon(ic, iconForGroup(g), 44);
-  const traits = el("div", { class: "traits", style: "align-items:center;margin-top:10px" }, ic,
-    (g.colors && g.colors.length ? g.colors : ["colour?"]).map((c, i) => el("span", { class: "chip" }, el("i", { class: "sw", style: `background:${g.halvesRgb && g.halvesRgb[i] ? rgbCss(g.halvesRgb[i]) : colorHex(c)}` }), c)),
-    g.twoTone && (g.colors || []).length < 2 ? el("span", { class: "chip", text: "two-tone" }) : null, g.shape ? el("span", { class: "chip", text: g.shape }) : null,
-    g.lengthMm ? el("span", { class: "chip num", text: pcxLen(g.lengthMm) }) : el("span", { class: "chip", text: "size unknown" }));
-  const wrap = el("div", { class: "wrap" }, tabs, zoom,
-    el("div", { class: "idtools" }, bEnh, bInv, bRot, bRst),
-    el("p", { class: "idcap", text: "Pinch or drag to zoom. Look for letters and numbers pressed into the pill, then type them below." }),
-    traits,
-    el("label", { class: "idlbl", text: two ? "Imprint, side A" : "Imprint (letters and numbers on the pill)" }, PCI.inps[0]),
-    two ? el("label", { class: "idlbl", text: "Imprint, side B" }, PCI.inps[1]) : null, keys,
-    el("button", { class: "lockbtn ghost", style: "margin-top:12px;width:100%", text: two ? "Re-scan the other side" : "Flip pill — scan the other side", onclick: pciFlip }),
-    el("div", { id: "idList", style: "margin-top:6px" }),
-    el("div", { class: "row" }, el("button", { class: "btn pri", text: "Scan another pill", onclick: pciRescan })));
-  R.append(wrap); R.scrollTop = 0; pciBindZoom(zoom); pciSyncTools(); pciRenderList();
+    el("button", { text: "Clear", style: "font-family:var(--font);font-size:1rem", onclick: () => { const i = PCI.fi; PCI.inps[i].value = ""; PCI.inps[i].dispatchEvent(new Event("input")); PCI.inps[i].focus(); } }));
+  const g = fr.group, ic = el("canvas"); drawPillIcon(ic, iconForGroup(g), 36);
+  const cap = (x) => x.charAt(0).toUpperCase() + x.slice(1);
+  const tparts = [...(g.colors && g.colors.length ? g.colors : ["colour?"]).map(cap)]; if (g.twoTone && (g.colors || []).length < 2) tparts.push("two-tone"); if (g.shape) tparts.push(g.shape); tparts.push(g.lengthMm ? pcxLen(g.lengthMm) : "size unknown");
+  const top = el("div", { id: "idTop" },
+    el("div", { class: "idhd" }, el("b", { text: "Read the imprint" }), el("button", { class: "tbtn", text: "Scan another", onclick: pciRescan })),
+    tabs, el("div", { class: "zwrap" }, zoom, el("div", { class: "zfab" }, bRot, bRst)),
+    el("div", { class: "idtools" }, bFlip, bEnh, bInv),
+    el("label", { class: "idlbl", text: two ? "Imprint, side A" : "Letters and numbers on the pill" }, PCI.inps[0]),
+    two ? el("label", { class: "idlbl", text: "Imprint, side B" }, PCI.inps[1]) : null,
+    el("details", { class: "qk" }, el("summary", { text: "Quick keys" }), keys));
+  const grab = el("div", { class: "grabbtn", role: "button", tabindex: "0", "aria-label": "Expand or collapse results" }, el("div", { class: "grab" }));
+  const toggleBig = () => R.classList.toggle("big");
+  let gy = null, swiped = false; grab.addEventListener("pointerdown", (e) => { gy = e.clientY; swiped = false; try { grab.setPointerCapture(e.pointerId); } catch {} });
+  grab.addEventListener("pointerup", (e) => { if (gy == null) return; const dy = e.clientY - gy; gy = null; if (dy < -24) { R.classList.add("big"); swiped = true; } else if (dy > 24) { R.classList.remove("big"); swiped = true; } });
+  grab.addEventListener("click", () => { if (swiped) { swiped = false; return; } toggleBig(); });
+  grab.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleBig(); } });
+  const sheetEl = el("section", { id: "idSheet", "aria-label": "Matches" }, grab,
+    el("div", { id: "idSum" }, ic, el("div", { id: "idSumTxt" }, el("div", { text: tparts.join(" · ") }))),
+    el("div", { id: "idList" }));
+  R.append(top, sheetEl); pciBindZoom(zoom); pciSyncTools(); pciRenderList();
   pciPrepDraw();
 }
 const pciSyncTools = () => { if (PCI.sync) PCI.sync(); };
@@ -1836,17 +1868,19 @@ function pciSimilar(r) {
 function pciRenderList() {
   const L = $("#idList"), fr = PCI.fr; if (!L || !fr) return; L.textContent = "";
   const rows = fr.rows, strong = rows.length && rows[0].score >= 0.85;
-  L.append(el("div", { class: "notice" }, el("span", { text: "⚠️" }), el("div", null, "Appearance and imprint suggest possibilities only. Confirm with the label, the pharmacist, or DailyMed before use.")));
-  if (!fr.q) L.append(el("p", { class: "idcap", style: "margin:0 0 8px", text: "No imprint entered yet. The letters and numbers on the pill narrow this down far more than colour and shape." }));
-  if (!rows.length) { L.append(el("div", { class: "empty", text: "No close matches in the on-device database. Check the imprint spelling, or try the other side." })); return; }
+  const sum = $("#idSumTxt"); if (sum) { [...sum.children].slice(1).forEach((n) => n.remove()); if (rows.length) sum.append(el("small", { text: `Top match: ${rows[0].name}${rows[0].strength ? " " + rows[0].strength : ""} · ${Math.round((rows[0].score || 0) * 100)}%` })); }
+  const disclaimer = el("div", { class: "notice" }, el("span", { text: "⚠️" }), el("div", null, "Appearance and imprint suggest possibilities only. Confirm with the label, the pharmacist, or DailyMed before use."));
+  L.append(el("p", { class: "idcap", text: fr.q ? "Possibilities only. Confirm with the label or a pharmacist." : "Type the imprint above to narrow this down. Possibilities only." }));
+  if (!rows.length) { L.append(el("div", { class: "empty", text: "No close matches in the on-device database. Check the imprint spelling, or try the other side." }), disclaimer); return; }
   if (strong) {
     L.append(el("h3", { class: "sec", text: "Best match" }), pciCard(rows[0], 0, true));
     if (rows.length > 1) L.append(el("h3", { class: "sec", text: "Other possibilities" }));
     rows.slice(1).forEach((r, i) => L.append(pciCard(r, i + 1, false)));
   } else {
-    L.append(el("h3", { class: "sec", text: "Possible matches — check the imprint" }));
+    L.append(el("h3", { class: "sec", text: "Possible matches" }));
     rows.forEach((r, i) => L.append(pciCard(r, i, false)));
   }
+  L.append(disclaimer);
 }
 function pciCountThese(row) {
   const g = PCI.fr ? PCI.fr.group : null;
@@ -1959,9 +1993,68 @@ function pciInit() {
   pciSyncSeg(); requestAnimationFrame(pciSyncSeg);
 }
 
+/* ============================== menu sheet + onboarding (pcu*) ============================== */
+const PCU_ICONS = {
+  area: '<path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3"/><rect x="9" y="9" width="6" height="6" rx="1"/>',
+  cal: '<path d="M3 15l12-12 6 6L9 21z"/><path d="M7 11l2 2M10 8l1.5 1.5M13 5l2 2M4.5 14.5L6 16"/>',
+  five: '<circle cx="6" cy="7" r="2"/><circle cx="12" cy="7" r="2"/><circle cx="18" cy="7" r="2"/><circle cx="9" cy="16" r="2"/><circle cx="15" cy="16" r="2"/>',
+  hist: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7v5l3 2"/>',
+  set: '<circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/>',
+  help: '<circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.6 2.2c-.7.4-1.1 1-1.1 1.8M12 17h.01"/>',
+  tray: '<rect x="3" y="6" width="18" height="12" rx="3"/><circle cx="8" cy="12" r="1.6"/><circle cx="12.5" cy="10.5" r="1.6"/><circle cx="16" cy="13.5" r="1.6"/>',
+  phone: '<rect x="7" y="3" width="10" height="18" rx="2.5"/><path d="M10 6h4M3 12h2M19 12h2"/>',
+  tap: '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3.5"/>',
+};
+const pcuSvg = (k, cls) => { const n = el("span", { class: cls || "si", "aria-hidden": "true" }); n.innerHTML = `<svg viewBox="0 0 24 24">${PCU_ICONS[k]}</svg>`; return n; };
+const pcuChev = () => { const n = el("span", { "aria-hidden": "true", style: "display:grid" }); n.innerHTML = '<svg class="chev2" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>'; return n; };
+function pcuOpenMenu() {
+  const idm = PCI.on, rows = [];
+  const row = (icon, label, val, fn, keepOpen) => el("button", { class: "srow", onclick: () => { if (!keepOpen) closeModal(); fn(); } }, pcuSvg(icon), el("span", { class: "sl", text: label }), val ? el("span", { class: "sv", text: val }) : null, pcuChev());
+  if (!idm) {
+    const seg = el("div", { class: "seg", role: "group", "aria-label": "Counting mode" });
+    for (const [m, t] of [["tray", "Tray"], ["free", "Anywhere"]]) seg.append(el("button", { text: t, "aria-pressed": String(S.mode === m), onclick: () => { if (S.mode !== m) setMode(m); seg.querySelectorAll("button").forEach((b, i) => b.setAttribute("aria-pressed", String(["tray", "free"][i] === S.mode))); } }));
+    rows.push(el("div", { class: "srow segrow" }, pcuSvg("tray"), el("span", { class: "sl", text: "Count on" }), seg));
+    rows.push(row("area", "Set area", S.roi ? "On" : "Off", () => $("#btnArea").click()));
+  }
+  if (idm || !$("#btnCal").hidden) rows.push(row("cal", idm ? "Add a coin for size" : "Calibrate size", !idm && S.mmPerNorm ? "Done" : "", () => $("#btnCal").click()));
+  else rows.push(el("div", { class: "srow", style: "color:var(--muted)" }, pcuSvg("cal"), el("span", { class: "sl", text: "Size from LiDAR (no calibration needed)" })));
+  if (!idm) {
+    const sw = el("button", { class: "srow", role: "switch", "aria-checked": String(PCX.groupsOn), onclick: () => { $("#chipG5").click(); sw.setAttribute("aria-checked", String(PCX.groupsOn)); } }, pcuSvg("five"), el("span", { class: "sl", text: "Groups of 5" }), el("span", { class: "sw2" }));
+    rows.push(sw);
+  }
+  rows.push(row("hist", idm ? "Identify history" : "History", "", () => $("#btnHist").click()));
+  rows.push(row("set", "Settings", "", () => $("#btnSet").click()));
+  rows.push(row("help", "Help", "", () => pcuOnboard(true)));
+  openModal(el("div", null, el("h2", { text: "Menu" }), ...rows));
+}
+$("#btnMenu").addEventListener("click", pcuOpenMenu);
+
+const PCU_STEPS = [
+  ["tray", "Spread pills on a dark tray", "A plain dark surface makes every pill easy to see. Keep them from touching."],
+  ["phone", "Hold the phone flat above them", "Frame the whole tray. The count updates live and locks when it is steady."],
+  ["tap", "Tap Capture to lock the count", "Tap a pill to remove it, or tap empty space to add one. Then save a record."],
+];
+function pcuOnboard(force) {
+  let seen = false; try { seen = !!localStorage.getItem("pc.onboarded"); } catch {}
+  if (seen && !force) return;
+  const box = $("#onb"); let i = 0;
+  const done = () => { box.hidden = true; try { localStorage.setItem("pc.onboarded", "1"); } catch {} };
+  const paint = () => {
+    const [ic, t, p] = PCU_STEPS[i];
+    $("#onbArt").innerHTML = `<svg viewBox="0 0 24 24">${PCU_ICONS[ic]}</svg>`;
+    $("#onbStep").textContent = `Step ${i + 1} of ${PCU_STEPS.length}`; $("#onbTitle").textContent = t; $("#onbText").textContent = p;
+    [...$("#onbDots").children].forEach((d, k) => d.classList.toggle("on", k === i));
+    $("#onbNext").textContent = i === PCU_STEPS.length - 1 ? "Got it" : "Next"; $("#onbSkip").hidden = i === PCU_STEPS.length - 1;
+  };
+  $("#onbNext").onclick = () => { if (i >= PCU_STEPS.length - 1) done(); else { i++; paint(); } };
+  $("#onbSkip").onclick = done;
+  box.onclick = (e) => { if (e.target === box) done(); };
+  paint(); box.hidden = false; $("#onbNext").focus();
+}
+
 /* ============================== boot ============================== */
 async function boot() {
-  pcxInit(); pciInit(); setMode(S.mode, true); renderHUD(computeDisplay()); renderPeek(null);
+  pcxInit(); pciInit(); setMode(S.mode, true); renderHUD(computeDisplay()); renderPeek(null); pcuOnboard(false);
   requestAnimationFrame(() => setMode(S.mode, true));
   if (S.demo) {
     $("#fallback").hidden = true; startDemo(); liveLoop();
