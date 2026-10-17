@@ -1,6 +1,7 @@
 // Pill Counter UI. Everything runs offline; the vision engine lives in pillcv.js (worker.js wraps it).
 import { analyze } from "./pillcv.js";
 import { identify, searchImprint } from "./pill-id.js";
+import { nbAvailable, nbStart, nbTorch, nbCapture } from "./native-bridge.js";
 
 /* ============================== helpers ============================== */
 const $ = (s) => document.querySelector(s);
@@ -45,7 +46,7 @@ const S = {
   corr: { adds: [], removed: new Set() },
   lock: null, calibrating: null, stillFrame: null,
   torch: { cap: false, on: false, track: null },
-  histIdx: -1, demo: location.hash.includes("demo"),
+  histIdx: -1, demo: location.hash.includes("demo"), demoLidar: location.hash.includes("demo-lidar"),
   idKey: "", idRows: [], idMatches: [], imprint: "", sheetOpen: false,
 };
 const app = $("#app"), video = $("#video"), still = $("#still"), demoCv = $("#demo"), cv = $("#overlay"), ctx = cv.getContext("2d");
@@ -61,7 +62,7 @@ class Engine {
       w.onmessage = (e) => {
         const m = e.data || {}; if (m.ready) return;
         const p = this.pending.get(m.id); if (!p) return; this.pending.delete(m.id);
-        if (m.error) p.rej(new Error(m.error)); else p.res(m.result);
+        if (m.error) p.rej(new Error(m.error)); else { if (p.wantDepth && m.result && !m.result.depth) this.depthMain = true; p.res(m.result); }
       };
       w.onerror = () => this.dropWorker();
       w.onmessageerror = () => this.dropWorker();
@@ -75,10 +76,17 @@ class Engine {
   }
   async run(imageData, opts) {
     const { width, height } = imageData;
+    if (this.worker && opts && opts.depth && this.depthMain) {
+      // worker.js does not return `depth` yet: analyse depth frames on the main thread so LiDAR results still work
+      await sleep(0);
+      const r = analyze(imageData.data, width, height, opts);
+      if (r.width == null) { r.width = width; r.height = height; }
+      return r;
+    }
     if (this.worker) {
       const id = ++this.seq;
       return new Promise((res, rej) => {
-        this.pending.set(id, { res, rej });
+        this.pending.set(id, { res, rej, wantDepth: !!(opts && opts.depth) });
         try { this.worker.postMessage({ id, rgba: imageData.data.buffer, width, height, opts }, [imageData.data.buffer]); }
         catch (e) { this.pending.delete(id); this.dropWorker(); rej(e); }
       });
@@ -237,7 +245,7 @@ function renderHUD(d) {
     const a = S.corr.adds.length, r = S.corr.removed.size;
     $("#corrTxt").textContent = [a ? `+${a} added` : "", r ? `−${r} removed` : ""].filter(Boolean).join(" · ");
   } else c.hidden = true;
-  pcxGoal(d); pcbBadge();
+  pcxGoal(d); pcbBadge(); nbaHudChip();
 }
 function a11y(msg) { let n = $("#live"); if (!n) { n = el("div", { id: "live", class: "vh", "aria-live": "polite" }); document.body.append(n); } n.textContent = msg; }
 
@@ -295,7 +303,7 @@ function statusOf(res, p) {
 }
 function syncMarkers(res, snap) {
   const items = [];
-  res.pills.forEach((p, i) => items.push({ kind: "pill", i, x: p.x, y: p.y, a: p.a, b: p.b, th: p.theta || 0, st: statusOf(res, p) }));
+  res.pills.forEach((p, i) => items.push({ kind: "pill", i, x: p.x, y: p.y, a: p.a, b: p.b, th: p.theta || 0, st: statusOf(res, p), hid: !!p.hidden }));
   res.fragments.forEach((f, i) => items.push({ kind: "frag", i, x: f.x, y: f.y, a: f.a, b: f.b, th: f.theta || 0, st: "frag" }));
   const live = markers.filter((m) => !m.dying);
   const pairs = [];
@@ -309,12 +317,12 @@ function syncMarkers(res, snap) {
   for (const [, ii, mi] of pairs) {
     if (ui.has(ii) || um.has(mi)) continue; ui.add(ii); um.add(mi);
     const m = live[mi], it = items[ii];
-    Object.assign(m, { tx: it.x, ty: it.y, ta: it.a, tb: it.b, tth: it.th, st: it.st, i: it.i });
+    Object.assign(m, { tx: it.x, ty: it.y, ta: it.a, tb: it.b, tth: it.th, st: it.st, i: it.i, hid: it.hid });
     if (snap) Object.assign(m, { x: it.x, y: it.y, a: it.a, b: it.b, th: it.th });
   }
   items.forEach((it, ii) => {
     if (ui.has(ii)) return;
-    markers.push({ kind: it.kind, i: it.i, st: it.st, x: it.x, y: it.y, a: it.a, b: it.b, th: it.th, tx: it.x, ty: it.y, ta: it.a, tb: it.b, tth: it.th, alpha: snap || RM ? 1 : 0, dying: false, seed: Math.random() * 6 });
+    markers.push({ kind: it.kind, i: it.i, st: it.st, hid: it.hid, x: it.x, y: it.y, a: it.a, b: it.b, th: it.th, tx: it.x, ty: it.y, ta: it.a, tb: it.b, tth: it.th, alpha: snap || RM ? 1 : 0, dying: false, seed: Math.random() * 6 });
   });
   live.forEach((m, mi) => { if (!um.has(mi)) m.dying = true; });
   if (snap || RM) markers = markers.filter((m) => !m.dying);
@@ -375,6 +383,7 @@ function drawReticle(V, t) {
 function drawPill(V, m, t) {
   const x = V.ox + m.x * V.s, y = V.oy + m.y * V.s, A = m.a * V.s, B = m.b * V.s;
   const removed = S.frozen && S.corr.removed.has(m.i);
+  if (m.hid && !removed) { nbaDrawGhost(x, y, A, B, m, t); return; }
   const st = removed ? "removed" : m.st, col = PAL[st];
   ctx.save(); ctx.globalAlpha = pcClamp(m.alpha, 0, 1);
   ctx.translate(x, y);
@@ -464,6 +473,7 @@ async function startCamera() {
   app.dataset.src = "video"; S.fit = "cover";
 }
 async function toggleTorch() {
+  if (S.source && S.source.kind === "native") { S.torch.on = !S.torch.on; try { nbTorch(S.torch.on); } catch { S.torch.on = false; toast("Light not available on this camera"); } $("#btnTorch").setAttribute("aria-pressed", S.torch.on); tipSig = ""; renderTips(); return; }
   if (!S.torch.track) return;
   try { S.torch.on = !S.torch.on; await S.torch.track.applyConstraints({ advanced: [{ torch: S.torch.on }] }); }
   catch { S.torch.on = false; toast("Light not available on this camera"); }
@@ -475,6 +485,7 @@ function startDemo() {
   demoCv.width = 720; demoCv.height = 960; const g = demoCv.getContext("2d");
   const slots = []; for (let r = 0; r < 5; r++) for (let c = 0; c < 5; c++) slots.push([100 + c * 130, 215 + r * 135]);
   const rnd = (() => { let s = 7; return () => (s = (s * 16807) % 2147483647) / 2147483647; })();
+  const lidar = S.demoLidar; let demoDepth = null;
   const base = slots.map((p, i) => ({ x: p[0] + (rnd() - 0.5) * 22, y: p[1] + (rnd() - 0.5) * 22, th: rnd() * Math.PI, kind: i === 12 ? "odd" : i === 23 ? "half" : "white" }));
   let n = 0;
   const draw = () => {
@@ -496,9 +507,10 @@ function startDemo() {
       g.restore();
     }
     g.fillStyle = "rgba(255,255,255,.04)"; g.fillRect(0, (n * 7) % 960, 720, 40);
+    if (lidar) demoDepth = nbaDemoDepth(base);
   };
   draw();
-  S.source = { kind: "demo", el: demoCv, dims: () => [720, 960], min: 500, tick: draw };
+  S.source = { kind: "demo", el: demoCv, dims: () => [720, 960], min: 500, tick: draw, getDepth: lidar ? () => demoDepth : null };
   app.dataset.src = "demo"; S.fit = "cover";
   S.imgW = 720; S.imgH = 960;
   $("#btnTorch").hidden = true;
@@ -517,6 +529,97 @@ async function fileToCanvas(file, maxLong) {
   return c;
 }
 
+/* ---- native iPhone camera + LiDAR (nba*) ---- */
+const nbaDM = new WeakMap(); // canvas -> depth object whose intrinsics are in that canvas's pixel units
+function nbaRot(a, w, h, C) { // rotate a w*h array 90 deg clockwise -> (h wide, w tall)
+  const o = new C(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) o[x * h + (h - 1 - y)] = a[y * w + x];
+  return o;
+}
+function nbaRotateFrame(f) {
+  const W = f.width, H = f.height, it = f.intrinsics, d = f.depth;
+  const rgba = new Uint8ClampedArray(W * H * 4), s = f.rgba;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = (y * W + x) * 4, j = (x * H + (H - 1 - y)) * 4;
+    rgba[j] = s[i]; rgba[j + 1] = s[i + 1]; rgba[j + 2] = s[i + 2]; rgba[j + 3] = s[i + 3];
+  }
+  const tf = (q) => ({ fx: q.fy, fy: q.fx, cx: (H - 1) - q.cy, cy: q.cx });
+  const out = { rgba, width: H, height: W, intrinsics: tf(it), depth: null };
+  if (d) out.depth = { data: nbaRot(d.data, d.w, d.h, Float32Array), w: d.h, h: d.w, conf: d.conf ? nbaRot(d.conf, d.w, d.h, Uint8Array) : null, ...tf(d) };
+  return out;
+}
+function nbaPaint(c, fr) {
+  if (c.width !== fr.width || c.height !== fr.height) { c.width = fr.width; c.height = fr.height; }
+  c.getContext("2d").putImageData(new ImageData(fr.rgba, fr.width, fr.height), 0, 0);
+}
+function nbaScaleDepth(d, k) { return k === 1 ? d : { ...d, fx: d.fx * k, fy: d.fy * k, cx: d.cx * k, cy: d.cy * k }; }
+function nbaDepthFor(srcCanvas, w) { const d = nbaDM.get(srcCanvas); return d ? nbaScaleDepth(d, w / srcCanvas.width) : null; }
+// crop (x0,y0,cs square, in source px) then scale by k: depth map is cropped to the same region, intrinsics shifted then scaled
+function nbaCropDepth(d, x0, y0, cs, k, W, H) {
+  const rx = d.w / W, ry = d.h / H;
+  const dx0 = pcClamp(Math.round(x0 * rx), 0, d.w - 2), dy0 = pcClamp(Math.round(y0 * ry), 0, d.h - 2);
+  const dw = pcClamp(Math.round(cs * rx), 2, d.w - dx0), dh = pcClamp(Math.round(cs * ry), 2, d.h - dy0);
+  const data = new Float32Array(dw * dh), conf = d.conf ? new Uint8Array(dw * dh) : null;
+  for (let y = 0; y < dh; y++) for (let x = 0; x < dw; x++) { const si = (dy0 + y) * d.w + dx0 + x; data[y * dw + x] = d.data[si]; if (conf) conf[y * dw + x] = d.conf[si]; }
+  return { data, w: dw, h: dh, conf, fx: d.fx * k, fy: d.fy * k, cx: (d.cx - x0) * k, cy: (d.cy - y0) * k };
+}
+async function nbaNextFrame(src) {
+  for (let i = 0; i < 120 && src.seq === src.used; i++) await sleep(15);
+  src.used = src.seq;
+}
+function nbaStartNative() {
+  const c = document.createElement("canvas");
+  const src = { kind: "native", el: c, dims: () => [c.width, c.height], min: 0, seq: 0, used: 0, cur: null, getDepth: () => (src.cur && src.cur.depth) || null };
+  return new Promise((resolve, reject) => {
+    let first = true;
+    const timer = setTimeout(() => { if (first) reject(new Error("no frames from the native camera")); }, 8000);
+    nbStart((f) => {
+      try { const r = nbaRotateFrame(f); nbaPaint(c, r); src.cur = r; src.seq++; } catch (e) { return; }
+      if (first) {
+        first = false; clearTimeout(timer);
+        S.source = src; app.dataset.src = "video"; S.fit = "cover"; S.imgW = c.width; S.imgH = c.height;
+        S.torch.cap = true; $("#btnTorch").hidden = false;
+        resolve();
+      }
+    }, (m) => { if (first) { first = false; clearTimeout(timer); reject(new Error(m)); } else console.warn("[native]", m); });
+  });
+}
+const nbaDepthUsed = () => !!(S.res && S.res.depth && S.res.depth.used);
+function nbaMmNorm() { // millimetres per normalised image (long side): LiDAR first, else coin calibration
+  if (nbaDepthUsed() && S.res.depth.mmPerPx > 0) return S.res.depth.mmPerPx * Math.max(S.res.width || S.imgW, S.res.height || S.imgH);
+  return S.mmPerNorm;
+}
+function nbaHudChip() {
+  let c = $("#nbaChip");
+  if (!c) { const sub = $("#sub"); c = el("span", { id: "nbaChip", text: "LiDAR", style: "display:block;width:fit-content;align-self:flex-start;font-size:11px;font-weight:700;letter-spacing:.04em;margin-top:2px;padding:1px 8px;border-radius:9px;background:var(--accent);color:var(--accent-ink)" }); sub.parentNode.insertBefore(c, sub.nextSibling); }
+  const on = nbaDepthUsed(); c.hidden = !on;
+  const cal = $("#btnCal"); if (cal) cal.hidden = on; // LiDAR gives mm directly: no coin calibration needed
+}
+function nbaDrawGhost(x, y, A, B, m, t) {
+  ctx.save(); ctx.globalAlpha = pcClamp(m.alpha, 0, 1) * 0.9; ctx.translate(x, y); ctx.rotate(m.th);
+  ctx.beginPath(); ctx.ellipse(0, 0, A + 2, B + 2, 0, 0, Math.PI * 2);
+  ctx.fillStyle = "rgba(255,255,255,.08)"; ctx.fill();
+  ctx.setLineDash([6, 5]); ctx.lineDashOffset = RM ? 0 : -t * 10; ctx.strokeStyle = "rgba(0,0,0,.45)"; ctx.lineWidth = 4.5; ctx.stroke();
+  ctx.strokeStyle = "rgba(255,255,255,.85)"; ctx.lineWidth = 2; ctx.stroke(); ctx.setLineDash([]); ctx.restore();
+  if (m.alpha > 0.5) chip(ctx, "under", x, y, "rgba(30,30,30,.75)", "#dfe6ea");
+}
+// #demo-lidar: flat tray plane at 0.28 m, pills raised ~3.5 mm, fx = fy = pxPerMm * 280 (demo image pixels)
+const NBA_DEMO_PXMM = 5.2;
+function nbaDemoDepth(pills) {
+  const dw = 192, dh = 256, W = 720, H = 960, k = W / dw, data = new Float32Array(dw * dh), conf = new Uint8Array(dw * dh).fill(2);
+  for (let i = 0; i < data.length; i++) data[i] = 0.28 + (Math.random() - 0.5) * 0.0006;
+  for (const p of pills) {
+    const A = 38, B = p.kind === "odd" ? 38 : 25, c = Math.cos(-p.th), s = Math.sin(-p.th), r = Math.max(A, B) / k + 2;
+    for (let y = Math.max(0, Math.floor(p.y / k - r)); y <= Math.min(dh - 1, Math.ceil(p.y / k + r)); y++)
+      for (let x = Math.max(0, Math.floor(p.x / k - r)); x <= Math.min(dw - 1, Math.ceil(p.x / k + r)); x++) {
+        const dx = (x + 0.5) * k - p.x, dy = (y + 0.5) * k - p.y, u = (dx * c - dy * s) / A, v = (dx * s + dy * c) / B, q = u * u + v * v;
+        if (q <= 1 && !(p.kind === "half" && u < 0)) data[y * dw + x] = 0.28 - 0.0035 * (1 - 0.25 * q);
+      }
+  }
+  const f = NBA_DEMO_PXMM * 280;
+  return { data, w: dw, h: dh, conf, fx: f, fy: f, cx: (W - 1) / 2, cy: (H - 1) / 2 };
+}
+
 /* ---- frame grabbing ---- */
 let liveCv = null;
 function grab(maxLong) {
@@ -525,7 +628,18 @@ function grab(maxLong) {
   const c = maxLong > 1000 ? document.createElement("canvas") : (liveCv || (liveCv = document.createElement("canvas")));
   if (c.width !== cw || c.height !== ch) { c.width = cw; c.height = ch; }
   const g = c.getContext("2d", { willReadFrequently: true }); g.drawImage(src.el, 0, 0, cw, ch);
+  const dp = src.getDepth ? src.getDepth() : null;
+  nbaDM.set(c, dp ? nbaScaleDepth(dp, cw / w) : null);
   return { canvas: c, w: cw, h: ch };
+}
+// high-res still: native iPhone capture (with LiDAR depth) or a plain canvas grab
+async function grabHi() {
+  if (S.source && S.source.kind === "native") {
+    const r = nbaRotateFrame(await nbCapture()), c = document.createElement("canvas");
+    nbaPaint(c, r); nbaDM.set(c, r.depth || null);
+    return { canvas: c, w: c.width, h: c.height };
+  }
+  return grab(2048);
 }
 function scaledCanvas(c, maxSide) {
   const k = Math.min(1, maxSide / Math.max(c.width, c.height));
@@ -536,11 +650,13 @@ function scaledCanvas(c, maxSide) {
 }
 const imageDataOf = (c) => c.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, c.width, c.height);
 const mmPerPxFor = (w, h) => (S.mmPerNorm ? S.mmPerNorm / Math.max(w, h) : undefined);
-function engineOpts(w, h, fast = false) {
+function engineOpts(w, h, fast = false, depthSrc = null) {
   // live frames: fast estimator; captured stills: full silhouette fitting for the exact count
   const o = { mode: S.mode, fast };
   if (S.roi) o.roi = { shape: S.roi.shape, x: S.roi.x, y: S.roi.y, w: S.roi.w, h: S.roi.h };
-  const mm = mmPerPxFor(w, h); if (mm) o.mmPerPx = mm;
+  const dp = depthSrc ? nbaDepthFor(depthSrc, w) : null;
+  if (dp) o.depth = dp;
+  const mm = mmPerPxFor(w, h); if (mm && !dp) o.mmPerPx = mm;
   return o;
 }
 
@@ -550,12 +666,13 @@ async function liveLoop() {
   while (S.source && !S.frozen && !PCI.on) {
     const t0 = performance.now();
     try {
+      if (S.source.kind === "native") await nbaNextFrame(S.source);
       if (S.source.tick && !document.hidden) S.source.tick();
       const epoch = S.epoch;
       const f = grab(720);
       if (S.liveFast && t0 - S.fastAt > 3000) S.liveFast = false; // retry full mode every ~3 s
       const wasFast = S.liveFast;
-      S.inflight = engine.run(imageDataOf(f.canvas), engineOpts(f.w, f.h, wasFast));
+      S.inflight = engine.run(imageDataOf(f.canvas), engineOpts(f.w, f.h, wasFast, f.canvas));
       const raw = await S.inflight; S.inflight = null;
       const rt = performance.now() - t0;
       if (!wasFast && rt > 900) { S.liveFast = true; S.fastAt = performance.now(); }
@@ -595,7 +712,9 @@ async function capture() {
     if (done) return;
     if (S.frozen) { setHint(""); await analyseStill(true); return; } // burst failed after freezing: single analysis of the frozen frame
   }
-  const f = grab(2048); freezeWith(f.canvas);
+  let f;
+  try { f = await grabHi(); } catch (e) { S.busy = false; app.classList.remove("busy"); return toast("Could not capture a photo"); }
+  freezeWith(f.canvas);
   S.fit = S.source.kind === "photo" ? "contain" : "cover";
   await analyseStill(true);
 }
@@ -626,7 +745,7 @@ async function pcbBurst() {
   for (let i = 0; i < PCB_N; i++) {
     if (i) await sleep(PCB_GAP);
     if (S.source.tick) S.source.tick();
-    const f = grab(2048); fr.push({ canvas: f.canvas, sharp: pcbSharp(f.canvas), res: null });
+    const f = await grabHi(); fr.push({ canvas: f.canvas, sharp: pcbSharp(f.canvas), res: null });
   }
   S.fit = "cover";
   const sharpest = fr.reduce((a, b) => (b.sharp > a.sharp ? b : a));
@@ -635,7 +754,7 @@ async function pcbBurst() {
     setHint(`Checking ${i + 1}/${fr.length}…`);
     try {
       const a = scaledCanvas(fr[i].canvas, 1600);
-      fr[i].res = normalise(await engine.run(imageDataOf(a), engineOpts(a.width, a.height)));
+      fr[i].res = normalise(await engine.run(imageDataOf(a), engineOpts(a.width, a.height, false, fr[i].canvas)));
     } catch (e) { fr[i].res = null; }
   }
   const ok = fr.filter((f) => f.res);
@@ -677,7 +796,7 @@ async function analyseStill(save, pre) {
   const c = S.stillFrame; if (!pre) S.burst = null;
   try {
     let res = pre;
-    if (!res) { const a = scaledCanvas(c, 1600); res = normalise(await engine.run(imageDataOf(a), engineOpts(a.width, a.height))); }
+    if (!res) { const a = scaledCanvas(c, 1600); res = normalise(await engine.run(imageDataOf(a), engineOpts(a.width, a.height, false, c))); }
     S.res = res; S.imgW = res.width || c.width; S.imgH = res.height || c.height;
     S.corr = { adds: [], removed: new Set() };
     syncMarkers(res, true); refreshFrozenUI();
@@ -896,7 +1015,7 @@ function scheduleId(now) {
 }
 function groupKey(g) {
   if (!g) return "none";
-  const mm = S.mmPerNorm ? Math.round(S.mmPerNorm * 100) : 0;
+  const mm = nbaMmNorm() ? Math.round(nbaMmNorm() * 100) : 0;
   return [g.colors && g.colors.join("/"), g.shape, g.twoTone, g.lengthMm ? Math.round(g.lengthMm) : "", mm, S.imprint, S.lock ? S.lock.row.name : ""].join("|");
 }
 async function refreshId() {
@@ -906,7 +1025,7 @@ async function refreshId() {
   S.idKey = key; idBusy = true;
   try {
     const m = await loadId();
-    const mm = S.mmPerNorm ? S.mmPerNorm / Math.max(S.imgW, S.imgH) : undefined;
+    const mm = nbaMmNorm() ? nbaMmNorm() / Math.max(S.imgW, S.imgH) : undefined;
     S.idRows = g ? m.identify(g, { mmPerPx: mm, imprint: S.imprint || undefined, limit: 8 }) || [] : [];
     S.idMatches = S.imprint && m.searchImprint ? m.searchImprint(S.imprint, { limit: 6 }) || [] : [];
   } catch (e) { S.idRows = []; S.idMatches = []; }
@@ -938,13 +1057,13 @@ function rowCard(r, i, kind) {
 function renderSheet(g) {
   body.textContent = "";
   if (!g) { body.append(el("div", { class: "empty", text: "Point the camera at pills, or capture a photo, to see likely matches." })); return; }
-  const mm = g.lengthMm || (S.mmPerNorm && g.lengthPx ? g.lengthPx * S.mmPerNorm / Math.max(S.imgW, S.imgH) : 0);
+  const mm = g.lengthMm || (nbaMmNorm() && g.lengthPx ? g.lengthPx * nbaMmNorm() / Math.max(S.imgW, S.imgH) : 0);
   const traits = el("div", { class: "traits" });
   (g.colors && g.colors.length ? g.colors : ["unknown"]).forEach((c, i) => traits.append(el("span", { class: "chip" }, el("i", { class: "sw", style: `background:${g.halvesRgb && g.halvesRgb[i] ? rgbCss(g.halvesRgb[i]) : colorHex(c)}` }), c)));
   if (g.twoTone) traits.append(el("span", { class: "chip", text: "two-tone" }));
   if (g.shape) traits.append(el("span", { class: "chip", text: g.shape }));
   traits.append(el("span", { class: "chip num", text: `${g.count} in group` }));
-  traits.append(mm ? el("span", { class: "chip num", text: `${pcxLen(mm)} long` }) : el("button", { class: "chip link", text: "Size unknown — calibrate", onclick: () => { toggleSheet(false); openCalibrate(); } }));
+  traits.append(mm ? el("span", { class: "chip num", text: `${pcxLen(mm)} long` }) : nbaDepthUsed() ? el("span", { class: "chip", text: "Size from LiDAR" }) : el("button", { class: "chip link", text: "Size unknown — calibrate", onclick: () => { toggleSheet(false); openCalibrate(); } }));
   const head = el("div", { style: "display:flex;gap:12px;align-items:center;margin-bottom:8px" });
   const big = el("canvas"); drawPillIcon(big, iconForGroup(g), 64); head.append(big, el("div", null, el("div", { style: "font-size:19px;font-weight:700", text: "Detected: " + pcDescribe(g) }), el("div", { class: "meta", style: "color:var(--muted);font-size:13px", text: `${S.frozen ? "From captured photo" : "Live view"} · most common pill` })));
   const imp = el("input", { type: "text", placeholder: "Type imprint (e.g. M366)", autocapitalize: "characters", autocomplete: "off", autocorrect: "off", spellcheck: "false", value: S.imprint, "aria-label": "Imprint text" });
@@ -1228,7 +1347,7 @@ async function pcxRecount() {
   const prev = pcxPts().map((p) => ({ x: p.x / N, y: p.y / N, r: Math.min(p.a, p.b) / N }));
   S.busy = true; app.classList.add("busy"); PCX.verify = null; PCX.hit = false;
   try { if (S.inflight) await S.inflight.catch(() => {}); } catch {}
-  try { if (S.source.tick) S.source.tick(); const f = grab(2048); freezeWith(f.canvas); } catch { S.busy = false; app.classList.remove("busy"); return toast("Could not recapture"); }
+  try { if (S.source.tick) S.source.tick(); const f = await grabHi(); freezeWith(f.canvas); } catch { S.busy = false; app.classList.remove("busy"); return toast("Could not recapture"); }
   await analyseStill(false);
   const now = frozenDisplay().count, N2 = Math.max(S.imgW, S.imgH), cur = pcxPts();
   const diffNew = cur.map((p) => ({ x: p.x, y: p.y, r: Math.min(p.a, p.b) })).filter((p) => !prev.some((q) => Math.hypot(q.x * N2 - p.x, q.y * N2 - p.y) < Math.max(p.r, q.r * N2) * 1.3));
@@ -1406,6 +1525,8 @@ function pciDemoDraw() {
 function pciGeom() { const [w, h] = S.source.dims(), m = Math.min(w, h), cs = Math.round(m * 0.45); return { w, h, cs, cx: (w - cs) / 2, cy: (h - cs) / 2 }; }
 function pciGrab() {
   const G = pciGeom(), src = S.source.el, c = PCI.cropCv, n = PCI.natCv, ns = Math.min(G.cs, 1000);
+  const dp = S.source.getDepth ? S.source.getDepth() : null;
+  nbaDM.set(c, dp ? nbaCropDepth(dp, G.cx, G.cy, G.cs, 720 / G.cs, G.w, G.h) : null);
   if (c.width !== 720) c.width = c.height = 720;
   if (n.width !== ns) n.width = n.height = ns;
   c.getContext("2d", { willReadFrequently: true }).drawImage(src, G.cx, G.cy, G.cs, G.cs, 0, 0, 720, 720);
@@ -1439,6 +1560,7 @@ async function pciLoop() {
         if (S.source.tick) S.source.tick();
         const ep = PCI.epoch, f = pciGrab(), mm = PCI.cal ? PCI.cal.mmPerSrc * f.cs / 720 : 0, o = { mode: "free", fast: false };
         if (mm) o.mmPerPx = mm;
+        const dpo = nbaDepthFor(PCI.cropCv, 720); if (dpo) { o.depth = dpo; delete o.mmPerPx; }
         const raw = await engine.run(imageDataOf(PCI.cropCv), o);
         if (ep === PCI.epoch && PCI.on && PCI.phase === "scan") pciOnResult(normalise(raw), f);
       } catch (e) { await sleep(150); }
@@ -1552,7 +1674,7 @@ function pciFreeze() {
   const side = { src: best.cv, p: best.p, enh: true, inv: false, view: { z: 1, x: 0, y: 0, rot: 0 }, N: 0, gray: null, orig: null, vis: null, visKey: "" };
   if (PCI.target === 1 && PCI.fr) { PCI.fr.sides[1] = side; PCI.act = 1; PCI.fi = 1; }
   else {
-    const mmpp = PCI.cal ? PCI.cal.mmPerSrc * best.cs / 720 : 0;
+    const dm = PCI.res && PCI.res.depth && PCI.res.depth.used && PCI.res.depth.mmPerPx, mmpp = dm || (PCI.cal ? PCI.cal.mmPerSrc * best.cs / 720 : 0);
     PCI.fr = { group: pciGroupOf(v), mmPerPx: mmpp, sides: [side], rows: [], q: "", hist: { t: Date.now(), thumb: pcxThumb(best.cv, 96), chosen: null } };
     PCI.imp = ["", ""]; PCI.act = 0; PCI.fi = 0;
   }
@@ -1846,7 +1968,7 @@ async function boot() {
     $("#sub").textContent = "Demo mode"; if (PCI.want && !PCI.on) pciEnter(); return;
   }
   try {
-    $("#fallback").hidden = true; await startCamera(); liveLoop(); if (PCI.want && !PCI.on) pciEnter();
+    $("#fallback").hidden = true; if (nbAvailable()) await nbaStartNative(); else await startCamera(); liveLoop(); if (PCI.want && !PCI.on) pciEnter();
   } catch (e) {
     const name = (e && e.name) || "Error";
     const denied = name === "NotAllowedError" || name === "SecurityError";

@@ -41,3 +41,22 @@ Live mode runs the same full engine on every frame at 720 px. When frames take t
 3. Avoid glare from a lamp directly overhead, or tilt the tray.
 4. Use **Capture** for the final number. It runs the slower, more exact analysis on several frames and checks they agree. Then glance at the markers, and tap to add or remove any that are wrong.
 5. Use **Recount** for a second, independent check on controlled counts.
+
+## With LiDAR (native iPhone app)
+
+`node test/depthcmp.mjs` runs the same synthetic scenes twice: camera only, and with a simulated iPhone LiDAR depth map (256×192, about 1 mm noise). It covers 20 scenes per layout. The numbers are exact count, then within ±1.
+
+| Layout | Camera only | With LiDAR |
+| --- | --- | --- |
+| Spread out | 70% / 75% | **90% / 90%** |
+| Touching | 40% / 45% | **80% / 85%** |
+| Overlapping | 10% / 15% | 10% / 30% |
+| Piled | 0% / 0% | 5% / 15% |
+
+Depth adds four things:
+- It finds pills by their height, so white pills on a white plate work.
+- It splits touching clumps by volume.
+- It counts some pills hidden underneath others. These are drawn as dashed "under" markers.
+- It gives true millimetre sizes for identification, with no coin needed.
+
+The stacking model, how much of a pile's height is pill rather than air gap, is tuned on synthetic stacks. It needs checking against real LiDAR captures of real pills.

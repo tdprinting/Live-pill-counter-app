@@ -2,7 +2,7 @@
 // and answers {id, result} or {id, error, code}.
 import { analyze } from "./pillcv.js";
 
-const KEEP = ["width", "height", "total", "range", "confidence", "pills", "fragments", "blobs", "groups", "background", "warnings", "tray", "ms"];
+const KEEP = ["width", "height", "total", "range", "confidence", "pills", "fragments", "blobs", "groups", "background", "warnings", "tray", "depth", "ms"];
 
 function slim(r) {
   const o = {};
