@@ -1,8 +1,11 @@
 name: Live Pill Counter native iPhone app (LiDAR)
 
+# The LiDAR app is parked while the web app is the focus. It only builds when you press
+# "Run workflow" on the Actions tab (or push a tag that starts with lidar-run-).
+# The saved copy of the code is the git tag lidar-build-v1.
 on:
   push:
-    branches: [main]
+    tags: ["lidar-run-*"]
   workflow_dispatch:
 
 concurrency:
