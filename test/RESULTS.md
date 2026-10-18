@@ -60,3 +60,7 @@ Depth adds four things:
 - It gives true millimetre sizes for identification, with no coin needed.
 
 The stacking model, how much of a pile's height is pill rather than air gap, is tuned on synthetic stacks. It needs checking against real LiDAR captures of real pills.
+
+## Pill identification
+
+See `test/ID-RESULTS.md`. The database now holds about 11,000 tablet and capsule appearances covering 589 drugs and about 1,000 manufacturers, built from FDA DailyMed, NLM RxNav and openFDA (`tools/DATA-SOURCES.md`). In a simulation of camera mistakes, the right drug is first about 96% of the time when the imprint is typed correctly. From appearance alone it is in the top 5 only about 15% of the time, because thousands of pills look alike. That is why the app says "possible matches" until an imprint matches, and why it always asks you to confirm with the label.

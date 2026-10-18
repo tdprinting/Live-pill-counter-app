@@ -17,3 +17,4 @@ test/bench-*.txt
 # iOS (CI generates these)
 ios/*.xcodeproj/
 ios/Generated/
+.uipreview/

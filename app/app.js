@@ -232,7 +232,8 @@ function renderHUD(d) {
   const pct = Math.round(d.conf * 100);
   $("#confLabel").textContent = d.state === "scan" ? "Getting ready…" : d.label;
   const f = $("#confFill"); f.style.width = (d.state === "scan" ? 0 : pct) + "%";
-  f.style.setProperty("--c", d.conf >= 0.85 ? "var(--accent)" : d.conf >= 0.55 ? "var(--accent-2)" : d.conf >= 0.35 ? "var(--amber)" : "var(--alert)");
+  f.dataset.lv = d.conf >= 0.85 ? "ok" : d.conf >= 0.55 ? "mid" : d.conf >= 0.35 ? "warn" : "bad";
+  app.dataset.ps = d.state;
   $("#confBar").setAttribute("aria-valuenow", pct);
   const st = $("#state"); const txt = st.querySelector("span");
   st.className = "state " + (d.state === "lock" ? "lock" : d.state === "hold" ? "hold" : d.state === "cap" ? "cap" : "");
@@ -262,7 +263,7 @@ const TIPS = {
   noisy: ["Grainy image", "Add light and hold the phone steady."],
 };
 const TIP_ORDER = ["dark", "pile", "white-on-white", "glare", "low-contrast", "noisy"];
-const alertWrap = $("#alertWrap"), alertPill = $("#alert"), alertListEl = $("#alertList");
+const alertWrap = $("#alertWrap"), alertPill = $("#alert"), alertListEl = $("#alertList"), pcgAlertIn = $("#alertListIn");
 let bannerSig = "", tipSig = "", alertOpen = false, lastOddMsg = "";
 const PCU_AIC = { odd: "!", hid: "", frag: "½", warn: "i" };
 function pcuAlertItems() {
@@ -291,17 +292,17 @@ function renderBanners() {
   const odd = items.find((p) => p.k === "odd");
   if (odd && odd.title !== lastOddMsg) { pcxSay(`Warning. ${odd.title} found`); pcxBuzz([60, 40, 60]); a11y(odd.title + " found"); }
   lastOddMsg = odd ? odd.title : "";
-  if (!items.length) { alertWrap.hidden = true; alertOpen = false; return; }
+  if (!items.length) { alertWrap.hidden = true; alertOpen = false; alertListEl.classList.remove("open"); alertWrap.classList.remove("open"); app.dataset.al = ""; return; }
   alertWrap.hidden = false;
   const top = items[0], more = items.length - 1;
-  alertPill.dataset.k = top.k;
+  alertPill.dataset.k = top.k; app.dataset.al = top.k;
   const ic = $("#alertIc"); ic.className = "aic " + top.k; ic.textContent = PCU_AIC[top.k];
   $("#alertTxt").textContent = top.title;
   $("#alertMore").textContent = more > 0 ? ` · +${more} more` : "";
   const slot = $("#alertActSlot"); slot.textContent = ""; const act = pcuAct(top); if (act) slot.append(act);
   $("#alertMain").setAttribute("aria-expanded", String(alertOpen));
-  alertListEl.hidden = !alertOpen; alertListEl.textContent = "";
-  if (alertOpen) for (const it of items) alertListEl.append(el("div", { class: "arow" }, el("span", { class: "aic " + it.k, text: PCU_AIC[it.k] }),
+  alertListEl.classList.toggle("open", alertOpen); alertWrap.classList.toggle("open", alertOpen); alertListEl.setAttribute("aria-hidden", String(!alertOpen)); pcgAlertIn.textContent = "";
+  for (const it of items) pcgAlertIn.append(el("div", { class: "arow" }, el("span", { class: "aic " + it.k, text: PCU_AIC[it.k] }),
     el("div", { class: "at" }, it.title, it.sub ? el("small", { text: it.sub }) : null), pcuAct(it)));
 }
 function renderTips() { renderBanners(); }
@@ -333,11 +334,12 @@ function syncMarkers(res, snap) {
     if (ui.has(ii) || um.has(mi)) continue; ui.add(ii); um.add(mi);
     const m = live[mi], it = items[ii];
     Object.assign(m, { tx: it.x, ty: it.y, ta: it.a, tb: it.b, tth: it.th, st: it.st, i: it.i, hid: it.hid });
+    if (it.st === "odd" && !m.oddAt) m.oddAt = performance.now(); else if (it.st !== "odd") m.oddAt = 0;
     if (snap) Object.assign(m, { x: it.x, y: it.y, a: it.a, b: it.b, th: it.th });
   }
   items.forEach((it, ii) => {
     if (ui.has(ii)) return;
-    markers.push({ kind: it.kind, i: it.i, st: it.st, hid: it.hid, x: it.x, y: it.y, a: it.a, b: it.b, th: it.th, tx: it.x, ty: it.y, ta: it.a, tb: it.b, tth: it.th, alpha: snap || RM ? 1 : 0, dying: false, seed: Math.random() * 6 });
+    markers.push({ kind: it.kind, i: it.i, st: it.st, hid: it.hid, x: it.x, y: it.y, a: it.a, b: it.b, th: it.th, tx: it.x, ty: it.y, ta: it.a, tb: it.b, tth: it.th, alpha: snap || RM ? 1 : 0, dying: false, seed: Math.random() * 6, oddAt: it.st === "odd" ? performance.now() : 0 });
   });
   live.forEach((m, mi) => { if (!um.has(mi)) m.dying = true; });
   if (snap || RM) markers = markers.filter((m) => !m.dying);
@@ -389,9 +391,12 @@ function frame(now) {
 }
 function drawReticle(V, t) {
   const w = Math.min(V.cw, V.ch) * 0.62, x = V.cw / 2 - w / 2, y = V.ch * 0.4 - w / 2, l = 24 + (RM ? 0 : Math.sin(t * 2) * 2);
-  ctx.save(); ctx.strokeStyle = "rgba(255,255,255,.6)"; ctx.lineWidth = 2; ctx.lineCap = "round";
-  for (const [cx, cy, sx, sy] of [[x, y, 1, 1], [x + w, y, -1, 1], [x, y + w, 1, -1], [x + w, y + w, -1, -1]]) {
-    ctx.beginPath(); ctx.moveTo(cx, cy + sy * l); ctx.lineTo(cx, cy); ctx.lineTo(cx + sx * l, cy); ctx.stroke();
+  ctx.save(); ctx.lineCap = "round"; ctx.lineJoin = "round";
+  for (const [lw, col] of [[6, "rgba(25,211,197,.22)"], [2, "rgba(255,255,255,.78)"]]) {
+    ctx.strokeStyle = col; ctx.lineWidth = lw;
+    for (const [cx, cy, sx, sy] of [[x, y, 1, 1], [x + w, y, -1, 1], [x, y + w, 1, -1], [x + w, y + w, -1, -1]]) {
+      ctx.beginPath(); ctx.moveTo(cx, cy + sy * l); ctx.lineTo(cx, cy); ctx.lineTo(cx + sx * l, cy); ctx.stroke();
+    }
   }
   ctx.restore();
 }
@@ -408,8 +413,9 @@ function drawPill(V, m, t) {
   if (st === "odd" || PCX.o.contrast) { ctx.fillStyle = col + (PCX.o.contrast ? "44" : "26"); ctx.fill(); }
   ctx.lineJoin = "round";
   if (st === "removed") ctx.setLineDash([6, 5]);
-  ctx.strokeStyle = PCX.o.contrast ? "#000" : "rgba(0,0,0,.3)"; ctx.lineWidth = 3.4 + hw * 1.5; ctx.stroke();
-  ctx.strokeStyle = col; ctx.lineWidth = (st === "odd" ? 2.6 : st === "low" ? 2 : 1.5) + hw; ctx.stroke();
+  ctx.strokeStyle = PCX.o.contrast ? "#000" : "rgba(0,0,0,.26)"; ctx.lineWidth = 4.2 + hw * 1.5; ctx.stroke();
+  if (!PCX.o.contrast) { ctx.strokeStyle = col + (st === "odd" ? "55" : "38"); ctx.lineWidth = st === "odd" ? 8 : 6; ctx.stroke(); } // soft outer glow
+  ctx.strokeStyle = col; ctx.lineWidth = (st === "odd" ? 2.4 : st === "low" ? 1.9 : 1.6) + hw; ctx.stroke();
   ctx.setLineDash([]);
   ctx.rotate(-m.th);
   if (removed) { const r = Math.min(A, B) * 0.55; ctx.strokeStyle = "#fff"; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.moveTo(-r, -r); ctx.lineTo(r, r); ctx.moveTo(r, -r); ctx.lineTo(-r, r); ctx.stroke(); }
@@ -418,6 +424,10 @@ function drawPill(V, m, t) {
     ctx.lineWidth = 4; ctx.strokeStyle = "rgba(0,0,0,.65)"; ctx.strokeText(m.idx, 0, 1); ctx.fillStyle = "#fff"; ctx.fillText(m.idx, 0, 1);
   }
   ctx.restore();
+  if (st === "odd" && !RM && m.oddAt && !removed) { // one gentle pulse ring when an odd pill is first seen
+    const k = (performance.now() - m.oddAt) / 1100;
+    if (k >= 0 && k < 1) { const e = 1 - Math.pow(1 - k, 3); ctx.save(); ctx.translate(x, y); ctx.rotate(m.th); ctx.globalAlpha = (1 - k) * 0.85 * pcClamp(m.alpha, 0, 1); ctx.beginPath(); ctx.ellipse(0, 0, A + 2 + e * 22, B + 2 + e * 22, 0, 0, Math.PI * 2); ctx.strokeStyle = PAL.odd; ctx.lineWidth = 2.2; ctx.stroke(); ctx.restore(); }
+  }
   if (st === "odd" && m.alpha > 0.4) { // small "!" dot on the upper right of the odd pill
     const d = Math.max(A, B) * 0.78, px = x + d, py = y - d;
     ctx.save(); ctx.globalAlpha = pcClamp(m.alpha, 0, 1); ctx.beginPath(); ctx.arc(px, py, 9, 0, Math.PI * 2); ctx.fillStyle = PAL.odd; ctx.fill();
@@ -448,7 +458,22 @@ function drawTray(V, dt, now) {
   const x = V.ox + tray.x * V.s, y = V.oy + tray.y * V.s, w = tray.w * V.s, h = tray.h * V.s;
   const path = () => { if (tr.poly && tr.poly.length > 2) { tr.poly.forEach((q, i) => (i ? ctx.lineTo(V.ox + q[0] * W * V.s, V.oy + q[1] * H * V.s) : ctx.moveTo(V.ox + q[0] * W * V.s, V.oy + q[1] * H * V.s))); ctx.closePath(); } else if (tr.shape === "ellipse") { ctx.ellipse(x + w / 2, y + h / 2, w / 2, h / 2, 0, 0, Math.PI * 2); } else { rr(ctx, x, y, w, h, Math.min(24, w / 6, h / 6)); } };
   ctx.save(); ctx.beginPath(); ctx.rect(0, 0, V.cw, V.ch); path(); ctx.fillStyle = "rgba(0,0,0,.38)"; ctx.fill("evenodd");
-  ctx.beginPath(); path(); ctx.strokeStyle = "rgba(255,255,255,.85)"; ctx.lineWidth = 2; ctx.setLineDash([]); ctx.stroke(); ctx.restore();
+  ctx.beginPath(); path(); ctx.strokeStyle = "rgba(25,211,197,.22)"; ctx.lineWidth = 7; ctx.setLineDash([]); ctx.stroke();
+  ctx.strokeStyle = "rgba(255,255,255,.8)"; ctx.lineWidth = 1.6; ctx.stroke();
+  // scanning sweep: one soft pass every ~3 s while counting live (not frozen, not locked)
+  const ds = PCX.lastD && PCX.lastD.state;
+  if (!RM && !S.frozen && !document.hidden && (ds === "scan" || ds === "hold" || ds === "none")) {
+    const ph = (now % 3000) / 1400;
+    if (ph < 1) {
+      const e = ph < 0.5 ? 2 * ph * ph : 1 - Math.pow(-2 * ph + 2, 2) / 2, yy = y + h * e, bh = Math.min(70, h * 0.3), a = Math.sin(ph * Math.PI);
+      ctx.save(); ctx.beginPath(); path(); ctx.clip();
+      const gr = ctx.createLinearGradient(0, yy - bh, 0, yy); gr.addColorStop(0, "rgba(25,211,197,0)"); gr.addColorStop(1, `rgba(120,245,235,${0.26 * a})`);
+      ctx.fillStyle = gr; ctx.fillRect(x, yy - bh, w, bh);
+      ctx.fillStyle = `rgba(190,255,248,${0.85 * a})`; ctx.fillRect(x, yy - 0.75, w, 1.5);
+      ctx.restore();
+    }
+  }
+  ctx.restore();
 }
 function drawRoi(V, now) {
   const r = S.roiEdit || S.roi; if (!r) return; const W = S.imgW, H = S.imgH;
@@ -751,6 +776,7 @@ async function pcbBurst() {
     if (i) await sleep(PCB_GAP);
     if (S.source.tick) S.source.tick();
     const f = await grabHi(); fr.push({ canvas: f.canvas, sharp: pcbSharp(f.canvas), res: null });
+    pcgRing((i + 1) / PCB_N);
   }
   S.fit = "cover";
   const sharpest = fr.reduce((a, b) => (b.sharp > a.sharp ? b : a));
@@ -777,6 +803,8 @@ async function pcbBurst() {
   await analyseStill(true, res);
   return true;
 }
+// progress ring around Capture during a burst (hands-free countdown drives the same ring from pcxAutoTick)
+function pcgRing(p) { const r = $("#autoRing"); r.classList.add("pcg-b"); r.style.display = "block"; $("#autoRingC").style.strokeDashoffset = String(251.3 * (1 - p)); }
 function pcbBadge() {
   const b = $("#pcbBadge");
   const B = S.frozen && S.burst;
@@ -792,7 +820,7 @@ function freezeWith(canvas) {
   still.classList.toggle("contain", S.fit === "contain");
   app.classList.add("frozen"); S.imgW = canvas.width; S.imgH = canvas.height;
   markers = []; S.corr = { adds: [], removed: new Set() };
-  $("#shutter").hidden = true; $("#retake").hidden = false;
+  $("#shutter").hidden = true; $("#retake").hidden = false; { const r = $("#autoRing"); r.style.display = "none"; r.classList.remove("pcg-b"); }
   $("#btnSave").hidden = false; $("#btnRecount").hidden = !(S.source && S.source.kind !== "photo");
 }
 async function analyseStill(save, pre) {
@@ -925,8 +953,22 @@ function updateHint() {
   if (!S.res) return setHint("");
   setHint(S.res.total === 0 ? (S.mode === "tray" ? "Frame the whole tray in view" : "Point the camera at the pills") : "");
 }
-function openModal(node) { const w = $("#modalWrap"), m = $("#modalBody"); m.textContent = ""; m.append(node); m.scrollTop = 0; $("#modal").style.transform = ""; w.hidden = false; }
-function closeModal() { $("#modalWrap").hidden = true; $("#modal").style.transform = ""; }
+let pcgCloseT = 0;
+function openModal(node) {
+  const w = $("#modalWrap"), m = $("#modalBody");
+  clearTimeout(pcgCloseT); const open = !w.hidden, out = w.classList.contains("out");
+  w.classList.remove("out"); w.classList.toggle("re", open && !out); w.classList.toggle("sw", open && out); // re = refresh inside an open sheet; sw = sheet reused while closing (menu row -> next sheet)
+  m.textContent = ""; m.append(node); m.scrollTop = 0; $("#modal").style.transform = ""; w.hidden = false;
+  document.body.classList.add("pcg-modal"); document.body.classList.remove("pcg-menu");
+}
+function closeModal() {
+  const w = $("#modalWrap"); clearTimeout(pcgCloseT);
+  document.body.classList.remove("pcg-modal", "pcg-menu");
+  if (w.hidden) return;
+  const fin = () => { w.hidden = true; w.classList.remove("out", "re", "sw"); $("#modal").style.transform = ""; };
+  if (RM) return fin();
+  w.classList.remove("re", "sw"); w.classList.add("out"); pcgCloseT = setTimeout(fin, 230);
+}
 $("#modalWrap").addEventListener("click", (e) => { if (e.target.id === "modalWrap") closeModal(); });
 // swipe down on the handle (or on the sheet while scrolled to the top) to dismiss
 (function pcuModalDrag() {
@@ -1057,9 +1099,12 @@ function renderPeek(g) {
   drawPillIcon(ic, iconForGroup(g));
   const best = S.lock ? S.lock.row : S.idRows[0];
   const name = best ? `${best.name}${best.strength ? " " + best.strength : ""}` : "";
-  $("#peekTitle").textContent = best ? `${S.lock ? "Locked: " : "Likely: "}${name}` : pcDescribe(g);
-  $("#peekSub").textContent = S.lock ? "Counting only this drug" : best ? "Confirm with the imprint" : "Type an imprint to identify";
-  il.hidden = false; it.textContent = best ? `${S.lock ? "Locked: " : "Likely: "}${name}` : `${pcDescribe(g)} · identify`;
+  // appearance alone is never conclusive (thousands of pills look alike): only say "Likely" when an
+  // imprint matched or the user locked a drug; otherwise describe what the camera sees
+  const strong = !!S.lock || !!(best && best.score >= 0.85);
+  $("#peekTitle").textContent = strong ? `${S.lock ? "Locked: " : "Likely: "}${name}` : pcDescribe(g);
+  $("#peekSub").textContent = S.lock ? "Counting only this drug" : strong ? "Confirm with the label" : best ? "Possible matches · check the imprint" : "Type an imprint to identify";
+  il.hidden = false; it.textContent = strong ? `${S.lock ? "Locked: " : "Likely: "}${name}` : `${pcDescribe(g)} · see possible matches`;
 }
 function rowCard(r, i, kind) {
   const c = el("div", { class: "card" + (kind === "best" ? " best" : ""), style: `animation-delay:${Math.min(i, 8) * 40}ms` });
@@ -1072,7 +1117,7 @@ function rowCard(r, i, kind) {
     el("div", { class: "meta", text: [(r.colors || []).join("/"), r.shape, r.sizeMm ? pcxLen(+r.sizeMm) : ""].filter(Boolean).join(" · ") }),
     r.labeler ? el("div", { class: "meta", text: r.labeler }) : null,
     r.reasons && r.reasons.length ? el("div", { class: "why", text: r.reasons.slice(0, 3).join(" · ") }) : null,
-    el("div", { class: "score" }, el("span", { text: sc + "%", class: "num", style: "min-width:34px" }), el("div", { class: "bar" }, el("i", { style: `width:${sc}%;--c:${sc > 70 ? "var(--accent)" : sc > 40 ? "var(--accent-2)" : "var(--amber)"}` }))),
+    el("div", { class: "score" }, el("span", { text: sc + "%", class: "num", style: "min-width:34px" }), el("div", { class: "bar" }, el("i", { style: `width:${sc}%`, "data-lv": sc > 70 ? "ok" : sc > 40 ? "mid" : "warn" }))),
     el("button", { class: "lockbtn" + (locked ? " on" : kind === "best" ? "" : " ghost"), text: locked ? "✓ Counting only this — tap to unlock" : "Count only this drug", onclick: () => (locked ? unlockDrug() : lockDrug(r)) })));
   return c;
 }
@@ -1167,8 +1212,9 @@ $("#fileCam").addEventListener("change", (e) => { onPhoto(e.target.files[0]); e.
 $("#fileLib").addEventListener("change", (e) => { onPhoto(e.target.files[0]); e.target.value = ""; });
 $("#fbRetry").addEventListener("click", () => boot());
 $("#shutter").addEventListener("click", capture);
+$("#shutter").addEventListener("pointerdown", () => pcxBuzz(8));
 $("#retake").addEventListener("click", retake);
-document.addEventListener("visibilitychange", () => { if (!document.hidden && video.srcObject && video.paused) video.play().catch(() => {}); });
+document.addEventListener("visibilitychange", () => { document.documentElement.classList.toggle("pcg-hidden", document.hidden); if (!document.hidden && video.srcObject && video.paused) video.play().catch(() => {}); });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeModal(); toggleSheet(false); if (!$("#onb").hidden) $("#onbSkip").click(); } if (e.key === " " && e.target === document.body && !PCI.on) { e.preventDefault(); S.frozen ? retake() : capture(); } });
 
 /* ============================== extras: target, tally, groups, voice, record, recount, settings ============================== */
@@ -1463,7 +1509,7 @@ function pcxAutoTick(now) {
   const ok = PCX.o.auto && !PCI.on && !S.frozen && !S.busy && S.source && S.source.kind !== "photo" && d && d.locked && d.conf >= 0.85 && d.count > 0
     && $("#modalWrap").hidden && !S.roiEdit && !S.calibrating && !document.hidden;
   if (!ok) { if (PCX.autoAt) { PCX.autoAt = 0; ring.style.display = "none"; } return; }
-  if (!PCX.autoAt) { PCX.autoAt = now; ring.style.display = "block"; }
+  if (!PCX.autoAt) { PCX.autoAt = now; ring.classList.remove("pcg-b"); ring.style.display = "block"; }
   const p = Math.min(1, (now - PCX.autoAt) / 2000);
   $("#autoRingC").style.strokeDashoffset = String(251.3 * (1 - p));
   if (p >= 1) { PCX.autoAt = 0; ring.style.display = "none"; pcxBeep(); pcxBuzz(30); capture(); }
@@ -1522,6 +1568,7 @@ const PCI = {
   cal: store.get("pc.pci.cal", null), cropCv: document.createElement("canvas"), natCv: document.createElement("canvas"),
 };
 const PCI_N = 6;
+const pcgFx = { br: 1.24, t: 0, flashAt: 0, was: false }; // identify reticle animation state
 const pciSaveCal = () => { if (!(PCI.cal && PCI.cal.demo)) store.set("pc.pci.cal", PCI.cal); };
 const pciKind = (g) => (g.colors || []).join("/") + "|" + (g.shape || "");
 
@@ -1649,7 +1696,7 @@ function pciRenderLive(steady) {
   const txt = !v ? "Looking for a pill…" : steady ? "Got it" : "Hold still…";
   if ($("#idStateTxt").textContent !== txt) $("#idStateTxt").textContent = txt;
   st.className = "idstate " + (steady ? "ok" : v ? "hold" : "");
-  const fill = $("#idSteady"); fill.style.width = Math.round((steady ? 1 : PCI.steady * 0.9) * 100) + "%"; fill.style.setProperty("--c", steady ? "var(--accent)" : "var(--amber)");
+  const fill = $("#idSteady"); fill.style.width = Math.round((steady ? 1 : PCI.steady * 0.9) * 100) + "%"; fill.dataset.lv = steady ? "ok" : "warn";
   panel.classList.toggle("got", steady);
   pciRenderPicks();
 }
@@ -1679,9 +1726,22 @@ function pciDraw(now) {
   const cw = cv.clientWidth, ch = cv.clientHeight, G = pciGeom(), s = Math.max(cw / G.w, ch / G.h), R = G.cs * s / 2, cx = cw / 2, cy = ch / 2, t = now / 1000;
   ctx.save(); ctx.beginPath(); ctx.rect(0, 0, cw, ch); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.fillStyle = "rgba(0,0,0,.5)"; ctx.fill("evenodd");
   const has = !!PCI.live, got = PCI.phase === "got";
-  ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.lineWidth = 3; ctx.strokeStyle = got ? "#19d3c5" : has ? "rgba(255,255,255,.95)" : "rgba(255,255,255,.7)";
+  const gcol = "#3be8b0";
+  if (got && !pcgFx.was) pcgFx.flashAt = now; pcgFx.was = got;
+  // corner brackets: relaxed when empty, tighten when a pill is seen, lock tight on "Got it"
+  const tgt = got ? 1.03 : has ? 1.08 : 1.24; pcgFx.br += (tgt - pcgFx.br) * (RM ? 1 : 1 - Math.exp(-(now - pcgFx.t) / 1000 * 9)); pcgFx.t = now;
+  const fk = pcgFx.flashAt ? (now - pcgFx.flashAt) / 520 : 1;
+  if (fk >= 0 && fk < 1 && !RM) { ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.fillStyle = `rgba(59,232,176,${0.34 * (1 - fk) * (1 - fk)})`; ctx.fill(); }
+  ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.lineWidth = 7; ctx.strokeStyle = got ? "rgba(59,232,176,.28)" : "rgba(25,211,197,.16)"; ctx.setLineDash([]); ctx.stroke();
+  ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.lineWidth = 2.2; ctx.strokeStyle = got ? gcol : has ? "rgba(255,255,255,.95)" : "rgba(255,255,255,.7)";
   ctx.setLineDash(has ? [] : [10, 8]); ctx.lineDashOffset = RM ? 0 : -t * 18; ctx.stroke(); ctx.setLineDash([]);
-  if (has) { ctx.beginPath(); ctx.arc(cx, cy, R + 7, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * (got ? 1 : PCI.steady), false); ctx.lineWidth = 5; ctx.lineCap = "round"; ctx.strokeStyle = got ? "#19d3c5" : "#ffb42e"; ctx.stroke(); }
+  { const hb = R * pcgFx.br, l = Math.min(34, R * 0.3); ctx.save(); ctx.lineCap = "round"; ctx.lineJoin = "round";
+    for (const [lw, col] of [[7, got ? "rgba(59,232,176,.28)" : "rgba(25,211,197,.2)"], [2.6, got ? gcol : "rgba(255,255,255,.92)"]]) {
+      ctx.lineWidth = lw; ctx.strokeStyle = col;
+      for (const [sx, sy] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) { const px = cx + sx * hb, py = cy + sy * hb; ctx.beginPath(); ctx.moveTo(px, py - sy * l); ctx.lineTo(px, py); ctx.lineTo(px - sx * l, py); ctx.stroke(); }
+    }
+    ctx.restore(); }
+  if (has) { ctx.beginPath(); ctx.arc(cx, cy, R + 7, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * (got ? 1 : PCI.steady), false); ctx.lineWidth = 4; ctx.lineCap = "round"; ctx.strokeStyle = got ? gcol : "#ffb42e"; ctx.stroke(); }
   const sc = (2 * R) / 720;
   PCI.cands.forEach((c, i) => {
     const sel = PCI.live && pciKind(c.g) === pciKind(PCI.live.g), x = cx - R + c.p.x * sc, y = cy - R + c.p.y * sc;
@@ -1846,7 +1906,7 @@ function pciCard(r, i, best) {
     r.imprint ? el("div", { class: "im", text: "Imprint: " + r.imprint }) : null,
     el("div", { class: "meta", text: [(r.colors || []).join("/"), r.shape, r.sizeMm ? pcxLen(+r.sizeMm) : ""].filter(Boolean).join(" · ") }),
     r.labeler ? el("div", { class: "meta", text: r.labeler }) : null,
-    el("div", { class: "score" }, el("span", { text: sc + "%", class: "num", style: "min-width:34px" }), el("div", { class: "bar" }, el("i", { style: `width:${sc}%;--c:${sc >= 85 ? "var(--accent)" : sc > 40 ? "var(--accent-2)" : "var(--amber)"}` }))),
+    el("div", { class: "score" }, el("span", { text: sc + "%", class: "num", style: "min-width:34px" }), el("div", { class: "bar" }, el("i", { style: `width:${sc}%`, "data-lv": sc >= 85 ? "ok" : sc > 40 ? "mid" : "warn" }))),
     el("div", null, (r.reasons || []).slice(0, 5).map((t) => el("span", { class: "tag", text: t }))),
     el("div", { class: "btns" },
       el("button", { class: "lockbtn" + (best ? "" : " ghost"), text: "Count these", onclick: () => pciCountThese(r) }),
@@ -1957,7 +2017,9 @@ function pciSyncSeg() {
   const seg = $("#appSeg"), th = seg.querySelector(".thumb");
   seg.querySelectorAll("button[data-app]").forEach((b) => b.setAttribute("aria-pressed", String((b.dataset.app === "identify") === PCI.want)));
   const act = seg.querySelector(`[data-app="${PCI.want ? "identify" : "count"}"]`);
+  const first = !th._r; if (first) th.style.transition = "none";
   th.style.width = act.offsetWidth + "px"; th.style.transform = `translateX(${act.offsetLeft - 3}px)`;
+  if (first && act.offsetWidth) { th._r = 1; void th.offsetWidth; requestAnimationFrame(() => { th.style.transition = ""; }); }
 }
 function pciSetAppMode(m) {
   const id = m === "identify"; PCI.want = id; store.set("pc.appmode", id ? "identify" : "count"); pciSyncSeg();
@@ -2025,9 +2087,9 @@ function pcuOpenMenu() {
   rows.push(row("hist", idm ? "Identify history" : "History", "", () => $("#btnHist").click()));
   rows.push(row("set", "Settings", "", () => $("#btnSet").click()));
   rows.push(row("help", "Help", "", () => pcuOnboard(true)));
-  openModal(el("div", null, el("h2", { text: "Menu" }), ...rows));
+  openModal(el("div", null, el("h2", { text: "Menu" }), ...rows)); document.body.classList.add("pcg-menu");
 }
-$("#btnMenu").addEventListener("click", pcuOpenMenu);
+$("#btnMenu").addEventListener("click", () => { if (document.body.classList.contains("pcg-menu")) closeModal(); else pcuOpenMenu(); });
 
 const PCU_STEPS = [
   ["tray", "Spread pills on a dark tray", "A plain dark surface makes every pill easy to see. Keep them from touching."],
@@ -2045,6 +2107,7 @@ function pcuOnboard(force) {
     $("#onbStep").textContent = `Step ${i + 1} of ${PCU_STEPS.length}`; $("#onbTitle").textContent = t; $("#onbText").textContent = p;
     [...$("#onbDots").children].forEach((d, k) => d.classList.toggle("on", k === i));
     $("#onbNext").textContent = i === PCU_STEPS.length - 1 ? "Got it" : "Next"; $("#onbSkip").hidden = i === PCU_STEPS.length - 1;
+    const cd = box.querySelector(".onbcard"); cd.classList.remove("step"); void cd.offsetWidth; cd.classList.add("step");
   };
   $("#onbNext").onclick = () => { if (i >= PCU_STEPS.length - 1) done(); else { i++; paint(); } };
   $("#onbSkip").onclick = done;
